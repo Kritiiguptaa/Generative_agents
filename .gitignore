@@ -1,5 +1,6 @@
 reverie/backend_server/utils.py
 frontend_server/settings/local.py
+
 storage/*
 static_dirs/*
 
@@ -36,6 +37,10 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+
+frontend_server/venv39
+environment/frontend_server/storage/*
+venv39
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

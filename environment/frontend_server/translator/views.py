@@ -3,15 +3,18 @@ Author: Joon Sung Park (joonspk@stanford.edu)
 File: views.py
 """
 import os
+import sys
 import string
 import random
 import json
 from os import listdir
-import os
 
 import datetime
 from django.shortcuts import render, redirect, HttpResponseRedirect
 from django.http import HttpResponse, JsonResponse
+
+# Add parent directory to path to import global_methods
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from global_methods import *
 
 from django.contrib.staticfiles.templatetags.staticfiles import static
