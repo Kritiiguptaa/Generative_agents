@@ -17,6 +17,63 @@ from global_methods import *
 from django.contrib.staticfiles.templatetags.staticfiles import static
 from .models import *
 
+
+def _get_latest_live_state_file(sim_code, persona_name, step):
+  """
+  Resolve the most relevant live state snapshot file for a persona.
+  """
+  live_dir = f"storage/{sim_code}/personas/{persona_name}/live_state"
+  if not os.path.exists(live_dir):
+    return None, step
+
+  live_steps = []
+  for filename in os.listdir(live_dir):
+    if filename.endswith(".json"):
+      try:
+        live_steps += [int(filename.split(".")[0])]
+      except:
+        pass
+
+  if not live_steps:
+    return None, step
+
+  live_steps = sorted(live_steps)
+  target_step = step if step in live_steps else live_steps[-1]
+
+  curr_sim_code_file = "temp_storage/curr_sim_code.json"
+  if check_if_file_exists(curr_sim_code_file):
+    with open(curr_sim_code_file) as json_file:
+      curr_sim_code = json.load(json_file).get("sim_code")
+    if curr_sim_code == sim_code:
+      target_step = live_steps[-1]
+
+  return f"{live_dir}/{target_step}.json", target_step
+
+
+def _split_associative_memory(associative):
+  """
+  Split associative memory nodes into event/chat/thought lists.
+  """
+  a_mem_event = []
+  a_mem_chat = []
+  a_mem_thought = []
+
+  ordered_nodes = sorted(
+    associative.values(),
+    key=lambda node: node.get("node_count", 0),
+    reverse=True,
+  )
+
+  for node_details in ordered_nodes:
+    if node_details.get("type") == "event":
+      a_mem_event += [node_details]
+    elif node_details.get("type") == "chat":
+      a_mem_chat += [node_details]
+    elif node_details.get("type") == "thought":
+      a_mem_thought += [node_details]
+
+  return a_mem_event, a_mem_chat, a_mem_thought
+
 def landing(request): 
   context = {}
   template = "landing/landing.html"
@@ -189,35 +246,33 @@ def replay_persona_state(request, sim_code, step, persona_name):
 
   persona_name_underscore = persona_name
   persona_name = " ".join(persona_name.split("_"))
-  memory = f"storage/{sim_code}/personas/{persona_name}/bootstrap_memory"
-  if not os.path.exists(memory): 
-    memory = f"compressed_storage/{sim_code}/personas/{persona_name}/bootstrap_memory"
+  is_live = False
+  live_state_file, live_step = _get_latest_live_state_file(sim_code,
+                                                           persona_name,
+                                                           step)
+  if live_state_file and os.path.exists(live_state_file):
+    with open(live_state_file) as json_file:
+      live_state = json.load(json_file)
+    scratch = live_state.get("scratch", dict())
+    spatial = live_state.get("spatial", dict())
+    associative = live_state.get("associative", dict())
+    step = live_step
+    is_live = True
+  else:
+    memory = f"storage/{sim_code}/personas/{persona_name}/bootstrap_memory"
+    if not os.path.exists(memory): 
+      memory = f"compressed_storage/{sim_code}/personas/{persona_name}/bootstrap_memory"
 
-  with open(memory + "/scratch.json") as json_file:  
-    scratch = json.load(json_file)
+    with open(memory + "/scratch.json") as json_file:  
+      scratch = json.load(json_file)
 
-  with open(memory + "/spatial_memory.json") as json_file:  
-    spatial = json.load(json_file)
+    with open(memory + "/spatial_memory.json") as json_file:  
+      spatial = json.load(json_file)
 
-  with open(memory + "/associative_memory/nodes.json") as json_file:  
-    associative = json.load(json_file)
+    with open(memory + "/associative_memory/nodes.json") as json_file:  
+      associative = json.load(json_file)
 
-  a_mem_event = []
-  a_mem_chat = []
-  a_mem_thought = []
-
-  for count in range(len(associative.keys()), 0, -1): 
-    node_id = f"node_{str(count)}"
-    node_details = associative[node_id]
-
-    if node_details["type"] == "event":
-      a_mem_event += [node_details]
-
-    elif node_details["type"] == "chat":
-      a_mem_chat += [node_details]
-
-    elif node_details["type"] == "thought":
-      a_mem_thought += [node_details]
+  a_mem_event, a_mem_chat, a_mem_thought = _split_associative_memory(associative)
   
   context = {"sim_code": sim_code,
              "step": step,
@@ -227,7 +282,8 @@ def replay_persona_state(request, sim_code, step, persona_name):
              "spatial": spatial,
              "a_mem_event": a_mem_event,
              "a_mem_chat": a_mem_chat,
-             "a_mem_thought": a_mem_thought}
+             "a_mem_thought": a_mem_thought,
+             "is_live": is_live}
   template = "persona_state/persona_state.html"
   return render(request, template, context)
 

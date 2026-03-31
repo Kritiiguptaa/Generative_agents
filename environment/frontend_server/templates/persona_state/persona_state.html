@@ -26,6 +26,11 @@
     	<h1 class="col-md-8" style="margin-bottom:0.8em; font-size:2em; ">
     		{{persona_name}}
     	</h1>
+	    	{% if is_live %}
+	    	<div class="col-md-4" style="text-align:right; padding-top:0.8em;">
+	    		<span style="background:#dff0d8; color:#3c763d; padding:0.4em 0.7em; border-radius:8px; font-weight:700;">Live mode</span>
+	    	</div>
+	    	{% endif %}
     </div>
     <div style="">
 
@@ -211,6 +216,14 @@
 		</div>
   </div>
 </div>
+
+{% if is_live %}
+<script type="text/javascript">
+	setTimeout(function () {
+		window.location.reload();
+	}, 2000);
+</script>
+{% endif %}
 {% endblock content %}
 
 

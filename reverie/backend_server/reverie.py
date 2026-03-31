@@ -57,6 +57,10 @@ class ReverieServer:
     sim_folder = f"{fs_storage}/{self.sim_code}"
     copyanything(fork_folder, sim_folder)
 
+    # Ensure step output directories exist for a fresh forked simulation.
+    create_folder_if_not_there(f"{sim_folder}/movement/0.json")
+    create_folder_if_not_there(f"{sim_folder}/environment/0.json")
+
     with open(f"{sim_folder}/reverie/meta.json") as json_file:  
       reverie_meta = json.load(json_file)
 
@@ -153,6 +157,9 @@ class ReverieServer:
     with open(f"{fs_temp_storage}/curr_step.json", "w") as outfile: 
       outfile.write(json.dumps(curr_step, indent=2))
 
+    # Save an initial snapshot so State Details has live data at step 0.
+    self._save_live_persona_state(self.step)
+
 
   def save(self): 
     """
@@ -185,6 +192,68 @@ class ReverieServer:
     for persona_name, persona in self.personas.items(): 
       save_folder = f"{sim_folder}/personas/{persona_name}/bootstrap_memory"
       persona.save(save_folder)
+
+
+  def _serialize_associative_memory(self, associative_memory):
+    """
+    Convert associative memory nodes to a JSON-serializable dictionary.
+    """
+    serialized_nodes = dict()
+    for count in range(1, len(associative_memory.id_to_node.keys()) + 1):
+      node_id = f"node_{str(count)}"
+      node = associative_memory.id_to_node[node_id]
+
+      serialized_nodes[node_id] = dict()
+      serialized_nodes[node_id]["node_count"] = node.node_count
+      serialized_nodes[node_id]["type_count"] = node.type_count
+      serialized_nodes[node_id]["type"] = node.type
+      serialized_nodes[node_id]["depth"] = node.depth
+      serialized_nodes[node_id]["created"] = node.created.strftime('%Y-%m-%d %H:%M:%S')
+      serialized_nodes[node_id]["expiration"] = None
+      if node.expiration:
+        serialized_nodes[node_id]["expiration"] = node.expiration.strftime('%Y-%m-%d %H:%M:%S')
+      serialized_nodes[node_id]["subject"] = node.subject
+      serialized_nodes[node_id]["predicate"] = node.predicate
+      serialized_nodes[node_id]["object"] = node.object
+      serialized_nodes[node_id]["description"] = node.description
+      serialized_nodes[node_id]["embedding_key"] = node.embedding_key
+      serialized_nodes[node_id]["poignancy"] = node.poignancy
+      serialized_nodes[node_id]["keywords"] = list(node.keywords)
+      serialized_nodes[node_id]["filling"] = node.filling
+
+    return serialized_nodes
+
+
+  def _serialize_scratch(self, scratch):
+    """
+    Convert scratch memory to a JSON-serializable dictionary.
+    """
+    scratch_data = dict(scratch.__dict__)
+    for dt_key in ["curr_time", "act_start_time", "chatting_end_time"]:
+      if scratch_data.get(dt_key):
+        scratch_data[dt_key] = scratch_data[dt_key].strftime("%B %d, %Y, %H:%M:%S")
+      else:
+        scratch_data[dt_key] = None
+
+    return scratch_data
+
+
+  def _save_live_persona_state(self, step):
+    """
+    Save a per-step persona snapshot used by the State Details view.
+    """
+    sim_folder = f"{fs_storage}/{self.sim_code}"
+    for persona_name, persona in self.personas.items():
+      snapshot = {
+        "step": step,
+        "scratch": self._serialize_scratch(persona.scratch),
+        "spatial": persona.s_mem.tree,
+        "associative": self._serialize_associative_memory(persona.a_mem)
+      }
+      out_file = f"{sim_folder}/personas/{persona_name}/live_state/{step}.json"
+      create_folder_if_not_there(out_file)
+      with open(out_file, "w") as outfile:
+        outfile.write(json.dumps(snapshot, indent=2))
 
 
   def start_path_tester_server(self): 
@@ -314,6 +383,7 @@ class ReverieServer:
       # the content of this for loop. Otherwise, we just wait. 
       curr_env_file = f"{sim_folder}/environment/{self.step}.json"
       if check_if_file_exists(curr_env_file):
+        env_retrieved = False
         # If we have an environment file, it means we have a new perception
         # input to our personas. So we first retrieve it.
         try: 
@@ -397,7 +467,9 @@ class ReverieServer:
           # {"persona": {"Maria Lopez": {"movement": [58, 9]}},
           #  "persona": {"Klaus Mueller": {"movement": [38, 12]}}, 
           #  "meta": {curr_time: <datetime>}}
+          self._save_live_persona_state(self.step)
           curr_move_file = f"{sim_folder}/movement/{self.step}.json"
+          create_folder_if_not_there(curr_move_file)
           with open(curr_move_file, "w") as outfile: 
             outfile.write(json.dumps(movements, indent=2))
 
@@ -610,55 +682,3 @@ if __name__ == '__main__':
 
   rs = ReverieServer(origin, target)
   rs.open_server()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
