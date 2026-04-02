@@ -20,7 +20,7 @@ from utils import *
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_GENERATE_URL = OLLAMA_BASE_URL + "/api/generate"
 # Models to use
-OLLAMA_CHAT_MODEL = "gpt-oss:latest"
+OLLAMA_CHAT_MODEL = "mistral"
 OLLAMA_EMBED_MODEL = "nomic-embed-text"
 
 def temp_sleep(seconds=0.1):
@@ -34,8 +34,11 @@ def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=300)
     "model": model,
     "prompt": prompt,
     "stream": stream,
+    # "format": "json",
     "options": {
-      "temperature": temperature
+      "temperature": temperature,
+      "num_gpu": -1,  # Use all GPU layers (-1 = all, 0 = CPU only)
+      "num_thread": 8  # CPU threads for non-GPU operations
     }
   }
   try:
@@ -43,7 +46,11 @@ def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=300)
     resp.raise_for_status()
     data = resp.json()
     # Ollama returns `response` in many setups; fall back to raw JSON if missing
-    return data.get("response") or data.get("text") or json.dumps(data)
+    # return data.get("response") or data.get("text") or json.dumps(data)
+    response = data.get("response") or data.get("text")
+    if not response:
+      raise ValueError(f"Unexpected OLLAMA response format: {data}")
+    return response.strip() if response else ""  
   except Exception as e:
     print("OLLAMA ERROR:", e)
     return "OLLAMA ERROR"

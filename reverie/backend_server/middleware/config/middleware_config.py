@@ -15,8 +15,9 @@ class MiddlewareConfig:
     # random_seed: int = 42
     
     # # ============ STABILIZER SETTINGS ============
-    # enable_stabilizer: bool = True
-    # entropy_discard_patterns: Optional[List[str]] = None
+    enable_stabilizer: bool = True
+    entropy_discard_patterns: Optional[List[str]] = None
+    persona_anchor_template: str = (...)
     # redundancy_window: int = 5
     # redundancy_threshold: float = 0.85
     
@@ -31,19 +32,19 @@ class MiddlewareConfig:
     # baseline_steps: int = 10
     # metrics_csv_path: str = "metrics/metrics.csv"
 
-    enable_stabilizer: bool=True
+    # enable_stabilizer: bool=True
 
-    persona_anchor_template: str = (
-        "You are {name}. Key traits: {traits}. Skills: {skills}. "
-        "Lifestyle: {lifestyle}. Act consistently with these. Never deviate."
-    )
-    def __post_init__(self):
-        """
-        Called automatically after dataclass creation.
-        Initialize list defaults.
-        """
-        if self.entropy_discard_patterns is None:
-            self.entropy_discard_patterns = ["idle", "greetings", "sleep", "waiting"]
+    # persona_anchor_template: str = (
+    #     "You are {name}. Key traits: {traits}. Skills: {skills}. "
+    #     "Lifestyle: {lifestyle}. Act consistently with these. Never deviate."
+    # )
+    # def __post_init__(self):
+    #     """
+    #     Called automatically after dataclass creation.
+    #     Initialize list defaults.
+    #     """
+    #     if self.entropy_discard_patterns is None:
+    #         self.entropy_discard_patterns = ["idle", "greetings", "sleep", "waiting"]
 
 def load_middleware_config(config_path: str) -> MiddlewareConfig:
     """

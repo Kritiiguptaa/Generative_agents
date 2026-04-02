@@ -17,7 +17,7 @@ from utils import *
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_GENERATE_URL = OLLAMA_BASE_URL + "/api/generate"
-OLLAMA_CHAT_MODEL = "gpt-oss:latest"
+OLLAMA_CHAT_MODEL = "mistral"
 
 def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=30):
   if model is None:
@@ -26,7 +26,11 @@ def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=30):
     "model": model,
     "prompt": prompt,
     "stream": stream,
-    "options": {"temperature": temperature}
+    "options": {
+      "temperature": temperature,
+      "num_gpu": -1,  # Use all GPU layers (-1 = all, 0 = CPU only)
+      "num_thread": 8  # CPU threads for non-GPU operations
+    }
   }
   try:
     resp = requests.post(OLLAMA_GENERATE_URL, json=payload, timeout=timeout)
