@@ -370,12 +370,23 @@ def run_gpt_prompt_task_decomp(persona,
         _cr += [" ".join([j.strip () for j in i.split(" ")][3:])]
       else: 
         _cr += [i]
-    for count, i in enumerate(_cr): 
+    
+    # FIXED - now properly indented
+    for count, i in enumerate(_cr):
+      if not i.strip():          # skip empty lines
+        continue
       k = [j.strip() for j in i.split("(duration in minutes:")]
+      if len(k) < 2:             # skip lines without duration
+        continue
       task = k[0]
-      if task[-1] == ".": 
+      if not task:               # skip if task name is empty
+        continue
+      if task[-1] == ".":
         task = task[:-1]
-      duration = int(k[1].split(",")[0].strip())
+      try:
+        duration = int(k[1].split(",")[0].strip())
+      except (ValueError, IndexError):
+        continue                 # skip unparseable duration
       cr += [[task, duration]]
 
     total_expected_min = int(prompt.split("(total duration in minutes")[-1]
@@ -392,12 +403,18 @@ def run_gpt_prompt_task_decomp(persona,
       if i_duration > 0: 
         for j in range(i_duration): 
           curr_min_slot += [(i_task, count)]       
-    curr_min_slot = curr_min_slot[1:]   
+    curr_min_slot = curr_min_slot[1:]
+    
+    # FIXED - handle empty list and safe index access
+    if not curr_min_slot:
+      curr_min_slot = [("dummy", 0) for _ in range(total_expected_min)]
 
     if len(curr_min_slot) > total_expected_min: 
-      last_task = curr_min_slot[60]
+      safe_idx = min(60, len(curr_min_slot) - 1)
+      last_task = curr_min_slot[safe_idx]
       for i in range(1, 6): 
-        curr_min_slot[-1 * i] = last_task
+        if len(curr_min_slot) >= i:
+          curr_min_slot[-1 * i] = last_task
     elif len(curr_min_slot) < total_expected_min: 
       last_task = curr_min_slot[-1]
       for i in range(total_expected_min - len(curr_min_slot)):
@@ -414,13 +431,11 @@ def run_gpt_prompt_task_decomp(persona,
     return cr
 
   def __func_validate(gpt_response, prompt=""): 
-    # TODO -- this sometimes generates error 
     try: 
       __func_clean_up(gpt_response)
+      return True
     except: 
-      pass
-      # return False
-    return gpt_response
+      return False
 
   def get_fail_safe(): 
     fs = ["asleep"]
