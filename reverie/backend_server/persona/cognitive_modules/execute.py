@@ -28,10 +28,22 @@ def execute(persona, maze, personas, plan):
        indexing (e.g., [-1]) because the latter address elements may not be 
        present in some cases. 
        e.g., "dolores double studio:double studio:bedroom 1:bed"
-    
   OUTPUT: 
     execution
   """
+  
+  def clean_address(address_str):
+    """Remove malformed characters and literal <random> tags from address"""
+    if not address_str:
+      return None
+    # Remove any literal <random> strings
+    address_str = address_str.replace("<random>", "").strip()
+    # Remove any stray braces or brackets
+    address_str = address_str.replace("{", "").replace("}", "")
+    # Clean up multiple colons
+    address_str = ":".join([p.strip() for p in address_str.split(":") if p.strip()])
+    return address_str if address_str else None
+  
   if "<random>" in plan and persona.scratch.planned_path == []: 
     persona.scratch.act_path_set = False
 
@@ -44,6 +56,10 @@ def execute(persona, maze, personas, plan):
 
     print ('aldhfoaf/????')
     print (plan)
+    
+    # Clean the plan to remove malformed LLM output
+    if "<random>" not in plan and "{" in plan:  # Only clean if not intentional <random>
+      plan = clean_address(plan)
 
     if "<persona>" in plan: 
       # Executing persona-persona interaction.
@@ -78,9 +94,13 @@ def execute(persona, maze, personas, plan):
 
     elif "<random>" in plan: 
       # Executing a random location action.
-      plan = ":".join(plan.split(":")[:-1])
-      target_tiles = maze.address_tiles[plan]
-      target_tiles = random.sample(list(target_tiles), 1)
+      cleaned_plan = clean_address(plan)
+      cleaned_plan = ":".join(cleaned_plan.split(":")[:-1]) if cleaned_plan else None
+      if cleaned_plan and cleaned_plan in maze.address_tiles:
+        target_tiles = maze.address_tiles[cleaned_plan]
+        target_tiles = random.sample(list(target_tiles), 1)
+      else:
+        target_tiles = [persona.scratch.curr_tile]
 
     else: 
       # This is our default execution. We simply take the persona to the
@@ -88,10 +108,12 @@ def execute(persona, maze, personas, plan):
       # Retrieve the target addresses. Again, plan is an action address in its
       # string form. <maze.address_tiles> takes this and returns candidate 
       # coordinates. 
-      if plan not in maze.address_tiles: 
-        maze.address_tiles["Johnson Park:park:park garden"] #ERRORRRRRRR
-      else: 
-        target_tiles = maze.address_tiles[plan]
+      cleaned_plan = clean_address(plan)
+      if cleaned_plan and cleaned_plan in maze.address_tiles:
+        target_tiles = maze.address_tiles[cleaned_plan]
+      else:
+        # Location does not exist in maze - keep persona at current location
+        target_tiles = [persona.scratch.curr_tile]
 
     # There are sometimes more than one tile returned from this (e.g., a tabe
     # may stretch many coordinates). So, we sample a few here. And from that 

@@ -17,10 +17,12 @@ def generate_poig_score(persona, event_type, description):
     return 1
 
   if event_type == "event": 
-    return run_gpt_prompt_event_poignancy(persona, description)[0]
+    result = run_gpt_prompt_event_poignancy(persona, description)
+    return result[0] if result and len(result) > 0 else 5
   elif event_type == "chat": 
-    return run_gpt_prompt_chat_poignancy(persona, 
-                           persona.scratch.act_description)[0]
+    result = run_gpt_prompt_chat_poignancy(persona, 
+                           persona.scratch.act_description)
+    return result[0] if result and len(result) > 0 else 5
 
 def perceive(persona, maze): 
   """

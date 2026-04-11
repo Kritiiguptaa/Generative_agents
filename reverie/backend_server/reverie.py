@@ -34,6 +34,7 @@ from global_methods import *
 from utils import *
 from maze import *
 from persona.persona import *
+from persona.prompt_template.hallucination_calculator import HallucinationCalculator
 
 ##############################################################################
 #                                  REVERIE                                   #
@@ -140,6 +141,11 @@ class ReverieServer:
     # <server_sleep> denotes the amount of time that our while loop rests each
     # cycle; this is to not kill our machine. 
     self.server_sleep = 0.1
+    
+    # HALLUCINATION TRACKING:
+    # Initialize hallucination tracking for all personas
+    self.hallucination_log_file = f"{sim_folder}/reverie/hallucination_analysis.json"
+    self.hallucination_history = {}
 
     # SIGNALING THE FRONTEND SERVER: 
     # curr_sim_code.json contains the current simulation code, and
@@ -455,6 +461,14 @@ class ReverieServer:
             movements["persona"][persona_name]["description"] = description
             movements["persona"][persona_name]["chat"] = (persona
                                                           .scratch.chat)
+            
+            # HALLUCINATION ANALYSIS:
+            # Calculate hallucination metrics for this persona at this step
+            try:
+              hallucination_report = self._calculate_persona_hallucination(persona, self.step)
+              movements["persona"][persona_name]["hallucination_score"] = hallucination_report["scores"]["overall"]
+            except Exception as e:
+              print(f"[Warning] Hallucination calculation failed for {persona_name}: {e}")
 
           # Include the meta information about the current stage in the 
           # movements dictionary. 
@@ -477,6 +491,10 @@ class ReverieServer:
           # current time moves by <sec_per_step> amount. 
           self.step += 1
           self.curr_time += datetime.timedelta(seconds=self.sec_per_step)
+          
+          # Save hallucination analysis every 10 steps to maintain a log
+          if self.step % 10 == 0:
+            self._save_hallucination_report()
 
           int_counter -= 1
           
@@ -668,6 +686,54 @@ class ReverieServer:
         traceback.print_exc()
         print ("Error.")
         pass
+
+  
+  def _calculate_persona_hallucination(self, persona, step):
+    """
+    Calculate hallucination metrics for a persona at the current step.
+    Logs the result to hallucination history.
+    
+    INPUT:
+      persona: The Persona instance
+      step: Current simulation step number
+    OUTPUT:
+      hallucination_report: Dict with scores and inconsistencies
+    """
+    calculator = HallucinationCalculator(persona)
+    report = calculator.get_report()
+    
+    # Store in history
+    if persona.name not in self.hallucination_history:
+      self.hallucination_history[persona.name] = []
+    
+    # Create history entry with step info
+    history_entry = {
+      "step": step,
+      "timestamp": report["timestamp"],
+      "scores": report["scores"],
+      "num_inconsistencies": len(report["inconsistencies"]),
+      "summary": report["summary"]
+    }
+    self.hallucination_history[persona.name].append(history_entry)
+    
+    return report
+  
+  def _save_hallucination_report(self):
+    """
+    Save hallucination analysis to file in JSON format.
+    This is called periodically during simulation to persist hallucination data.
+    
+    INPUT:
+      None
+    OUTPUT:
+      None (writes to file)
+    """
+    try:
+      os.makedirs(os.path.dirname(self.hallucination_log_file), exist_ok=True)
+      with open(self.hallucination_log_file, "w") as outfile:
+        outfile.write(json.dumps(self.hallucination_history, indent=2))
+    except Exception as e:
+      print(f"[Warning] Failed to save hallucination report: {e}")
 
 
 if __name__ == '__main__':

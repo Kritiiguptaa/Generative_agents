@@ -438,7 +438,7 @@ def run_gpt_prompt_task_decomp(persona,
       return False
 
   def get_fail_safe(): 
-    fs = ["asleep"]
+    fs = [["asleep", int(duration)]]
     return fs
 
   gpt_param = {"engine": "text-davinci-003", "max_tokens": 1000, 
@@ -567,22 +567,54 @@ def run_gpt_prompt_action_sector(action_description,
     
 
 
+  # def __func_clean_up(gpt_response, prompt=""):
+  #   # Handle both JSON format (with }) and plain text responses from phi3:mini
+  #   if "}" in gpt_response:
+  #     cleaned_response = gpt_response.split("}")[0]
+  #   else:
+  #     cleaned_response = gpt_response.strip()
+  #   # Remove any malformed content
+  #   cleaned_response = cleaned_response.replace('<random>', '').replace('{', '').strip()
+  #   return cleaned_response if cleaned_response else "kitchen"
   def __func_clean_up(gpt_response, prompt=""):
-    cleaned_response = gpt_response.split("}")[0]
+    if not gpt_response:
+      return ""
+
+    # Accept both fenced/json-ish and plain-text outputs
+    cleaned_response = gpt_response.strip()
+    if "}" in cleaned_response:
+      cleaned_response = cleaned_response.split("}")[0]
+
+    # Remove common formatting/malformed tokens from phi3 output
+    cleaned_response = (cleaned_response
+                        .replace("```json", "")
+                        .replace("```", "")
+                        .replace("<random>", "")
+                        .replace("{", "")
+                        .replace('"', "")
+                        .strip())
+
     return cleaned_response
 
   def __func_validate(gpt_response, prompt=""): 
-    if len(gpt_response.strip()) < 1: 
+    try:
+      cleaned = __func_clean_up(gpt_response, prompt="")
+      # Just check that we have some valid text, be lenient for phi3:mini
+      if len(cleaned.strip()) < 1: 
+        return False
+      # Reject if has commas (probably malformed)
+      if "," in cleaned: 
+        return False
+      return True
+    except:
       return False
-    if "}" not in gpt_response:
-      return False
-    if "," in gpt_response: 
-      return False
-    return True
   
-  def get_fail_safe(): 
-    fs = ("kitchen")
-    return fs
+  # def get_fail_safe(): 
+  #   fs = ("kitchen")
+  #   return fs
+  def get_fail_safe():
+  # Use persona's home sector instead of always "kitchen"
+    return persona.scratch.living_area.split(":")[1]
 
 
   # # ChatGPT Plugin ===========================================================
@@ -899,13 +931,17 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
   
   def __func_clean_up(gpt_response, prompt=""):
     cr = gpt_response.strip()
+    # Remove <random> placeholders and malformed content
+    cr = cr.replace('<random>', 'unknown').replace('{', '').replace('}', '')
     cr = [i.strip() for i in cr.split(")")[0].split(",")]
+    # Filter out empty strings
+    cr = [i for i in cr if i and len(i) > 0]
     return cr
 
   def __func_validate(gpt_response, prompt=""): 
     try: 
       gpt_response = __func_clean_up(gpt_response, prompt="")
-      if len(gpt_response) != 2: 
+      if len(gpt_response) != 3:  # Event triples have 3 parts: (subject, predicate, object)
         return False
     except: return False
     return True 
@@ -988,12 +1024,19 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
   
   def __func_clean_up(gpt_response, prompt=""):
     cr = gpt_response.strip()
-    if cr[-1] == ".": cr = cr[:-1]
-    return cr
+    # Remove any <random> placeholders or malformed content from phi3:mini
+    cr = cr.replace('<random>', '').replace('{', '').replace('}', '')
+    # Clean up any remaining garbage
+    if cr.endswith('.'): cr = cr[:-1]
+    cr = cr.strip()
+    return cr if cr else "is idle"
 
   def __func_validate(gpt_response, prompt=""): 
     try: 
-      gpt_response = __func_clean_up(gpt_response, prompt="")
+      cleaned = __func_clean_up(gpt_response, prompt="")
+      # Ensure we have valid content after cleanup
+      if not cleaned or len(cleaned) < 2:
+        return False
     except: 
       return False
     return True 
@@ -1005,17 +1048,20 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
   # ChatGPT Plugin ===========================================================
   def __chat_func_clean_up(gpt_response, prompt=""): ############
     cr = gpt_response.strip()
-    if cr[-1] == ".": cr = cr[:-1]
-    return cr
+    # Remove any <random> placeholders or malformed content from phi3:mini
+    cr = cr.replace('<random>', '').replace('{', '').replace('}', '')
+    if cr.endswith('.'): cr = cr[:-1]
+    cr = cr.strip()
+    return cr if cr else "is idle"
 
   def __chat_func_validate(gpt_response, prompt=""): ############
     try: 
-      gpt_response = __func_clean_up(gpt_response, prompt="")
+      cleaned = __chat_func_clean_up(gpt_response, prompt="")
+      if not cleaned or len(cleaned) < 2:
+        return False
     except: 
       return False
-    return True 
-
-  print ("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 6") ########
+    return True
   gpt_param = {"engine": "text-davinci-002", "max_tokens": 15, 
                "temperature": 0, "top_p": 1, "stream": False,
                "frequency_penalty": 0, "presence_penalty": 0, "stop": None}
@@ -1066,13 +1112,17 @@ def run_gpt_prompt_act_obj_event_triple(act_game_object, act_obj_desc, persona, 
   
   def __func_clean_up(gpt_response, prompt=""):
     cr = gpt_response.strip()
+    # Remove <random> placeholders and malformed content
+    cr = cr.replace('<random>', 'unknown').replace('{', '').replace('}', '')
     cr = [i.strip() for i in cr.split(")")[0].split(",")]
+    # Filter out empty strings
+    cr = [i for i in cr if i and len(i) > 0]
     return cr
 
   def __func_validate(gpt_response, prompt=""): 
     try: 
       gpt_response = __func_clean_up(gpt_response, prompt="")
-      if len(gpt_response) != 2: 
+      if len(gpt_response) != 3:  # Object event triples have 3 parts: (object, predicate, state) 
         return False
     except: return False
     return True 

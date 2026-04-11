@@ -220,7 +220,10 @@ def generate_action_event_triple(act_desp, persona):
     "🧈🍞"
   """
   if debug: print ("GNS FUNCTION: <generate_action_event_triple>")
-  return run_gpt_prompt_event_triple(act_desp, persona)[0]
+  result = run_gpt_prompt_event_triple(act_desp, persona)
+  if result is None or len(result) == 0:
+    return (persona.name, "is", act_desp)
+  return result[0]
 
 
 def generate_poig_score(persona, event_type, description): 
@@ -230,10 +233,12 @@ def generate_poig_score(persona, event_type, description):
     return 1
 
   if event_type == "event" or event_type == "thought": 
-    return run_gpt_prompt_event_poignancy(persona, description)[0]
+    result = run_gpt_prompt_event_poignancy(persona, description)
+    return result[0] if result and len(result) > 0 else 5
   elif event_type == "chat": 
-    return run_gpt_prompt_chat_poignancy(persona, 
-                           persona.scratch.act_description)[0]
+    result = run_gpt_prompt_chat_poignancy(persona, 
+                           persona.scratch.act_description)
+    return result[0] if result and len(result) > 0 else 5
 
 
 def load_history_via_whisper(personas, whispers):

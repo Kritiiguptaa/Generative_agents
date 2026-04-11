@@ -18,7 +18,8 @@ from persona.prompt_template.run_gpt_prompt import *
 from persona.prompt_template.gpt_structure import *
 from persona.cognitive_modules.retrieve import *
 
-def generate_focal_points(persona, n=3): 
+# def generate_focal_points(persona, n=3): 
+def generate_focal_points(persona, n=1): 
   if debug: print ("GNS FUNCTION: <generate_focal_points>")
   
   nodes = [[i.last_accessed, i]
@@ -67,7 +68,10 @@ def generate_action_event_triple(act_desp, persona):
     "🧈🍞"
   """
   if debug: print ("GNS FUNCTION: <generate_action_event_triple>")
-  return run_gpt_prompt_event_triple(act_desp, persona)[0]
+  result = run_gpt_prompt_event_triple(act_desp, persona)
+  if result is None or len(result) == 0:
+    return (persona.name, "is", act_desp)
+  return result[0]
 
 
 def generate_poig_score(persona, event_type, description): 
@@ -77,10 +81,12 @@ def generate_poig_score(persona, event_type, description):
     return 1
 
   if event_type == "event" or event_type == "thought": 
-    return run_gpt_prompt_event_poignancy(persona, description)[0]
+    result = run_gpt_prompt_event_poignancy(persona, description)
+    return result[0] if result and len(result) > 0 else 5
   elif event_type == "chat": 
-    return run_gpt_prompt_chat_poignancy(persona, 
-                           persona.scratch.act_description)[0]
+    result = run_gpt_prompt_chat_poignancy(persona, 
+                           persona.scratch.act_description)
+    return result[0] if result and len(result) > 0 else 5
 
 
 
@@ -118,7 +124,8 @@ def run_reflect(persona):
     xx = [i.embedding_key for i in nodes]
     for xxx in xx: print (xxx)
 
-    thoughts = generate_insights_and_evidence(persona, nodes, 5)
+    # thoughts = generate_insights_and_evidence(persona, nodes, 5)
+    thoughts = generate_insights_and_evidence(persona, nodes, 2)
     for thought, evidence in thoughts.items(): 
       created = persona.scratch.curr_time
       expiration = persona.scratch.curr_time + datetime.timedelta(days=30)

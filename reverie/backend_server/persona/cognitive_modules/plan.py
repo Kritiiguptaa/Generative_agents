@@ -218,9 +218,14 @@ def generate_action_game_object(act_desp, act_address, persona, maze):
     "bed"
   """
   if debug: print ("GNS FUNCTION: <generate_action_game_object>")
-  if not persona.s_mem.get_str_accessible_arena_game_objects(act_address): 
+  try:
+    accessible_objects = persona.s_mem.get_str_accessible_arena_game_objects(act_address)
+    if not accessible_objects: 
+      return "<random>"
+    return run_gpt_prompt_action_game_object(act_desp, persona, maze, act_address)[0]
+  except KeyError:
+    # Arena does not exist in spatial memory - fallback to random object
     return "<random>"
-  return run_gpt_prompt_action_game_object(act_desp, persona, maze, act_address)[0]
 
 
 def generate_action_pronunciatio(act_desp, persona): 
@@ -266,12 +271,18 @@ def generate_action_event_triple(act_desp, persona):
 
 def generate_act_obj_desc(act_game_object, act_desp, persona): 
   if debug: print ("GNS FUNCTION: <generate_act_obj_desc>")
-  return run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona)[0]
+  result = run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona)
+  if result is None or len(result) == 0:
+    return f"{act_game_object} is {act_desp}"
+  return result[0]
 
 
 def generate_act_obj_event_triple(act_game_object, act_obj_desc, persona): 
   if debug: print ("GNS FUNCTION: <generate_act_obj_event_triple>")
-  return run_gpt_prompt_act_obj_event_triple(act_game_object, act_obj_desc, persona)[0]
+  result = run_gpt_prompt_act_obj_event_triple(act_game_object, act_obj_desc, persona)
+  if result is None or len(result) == 0:
+    return (act_game_object, "is", "involved")
+  return result[0]
 
 
 def generate_convo(maze, init_persona, target_persona): 
@@ -613,7 +624,13 @@ def _determine_action(persona, maze):
   persona.scratch.f_daily_schedule += [["sleeping", 1440 - x_emergency]]
   
 
-
+  # Safety check: ensure curr_index is within bounds
+  # This can happen if schedule generation failed (e.g., Ollama error)
+  if curr_index >= len(persona.scratch.f_daily_schedule):
+    print(f"⚠️  WARNING: curr_index ({curr_index}) out of bounds. Schedule length: {len(persona.scratch.f_daily_schedule)}")
+    print(f"   Resetting to default full-day sleep schedule.")
+    persona.scratch.f_daily_schedule = [["sleeping", 1440]]
+    curr_index = 0
 
   act_desp, act_dura = persona.scratch.f_daily_schedule[curr_index] 
 
@@ -629,6 +646,11 @@ def _determine_action(persona, maze):
   act_game_object = generate_action_game_object(act_desp, act_address,
                                                 persona, maze)
   new_address = f"{act_world}:{act_sector}:{act_arena}:{act_game_object}"
+  
+  # Sanitize the address to remove malformed LLM output (literal <random>, braces, etc.)
+  new_address = new_address.replace("<random>", "").replace("{", "").replace("}", "")
+  new_address = ":".join([p.strip() for p in new_address.split(":") if p.strip()])
+  
   act_pron = generate_action_pronunciatio(act_desp, persona)
   act_event = generate_action_event_triple(act_desp, persona)
   # Persona's actions also influence the object states. We set those up here. 

@@ -17,7 +17,7 @@ from utils import *
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_GENERATE_URL = OLLAMA_BASE_URL + "/api/generate"
-OLLAMA_CHAT_MODEL = "mistral"
+OLLAMA_CHAT_MODEL = "phi3:mini"
 
 def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=30):
   if model is None:
