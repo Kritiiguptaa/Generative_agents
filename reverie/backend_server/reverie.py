@@ -28,7 +28,10 @@ import os
 import shutil
 import traceback
 
-from selenium import webdriver
+try:
+  from selenium import webdriver
+except ImportError:
+  webdriver = None
 
 from global_methods import *
 from utils import *
@@ -141,6 +144,14 @@ class ReverieServer:
     # <server_sleep> denotes the amount of time that our while loop rests each
     # cycle; this is to not kill our machine. 
     self.server_sleep = 0.1
+
+    # Performance tuning knobs.
+    # Defaults preserve the original behavior.
+    self.hallucination_enabled = True
+    self.hallucination_interval = 1
+    self.hallucination_save_interval = 10
+    self.live_state_save_interval = 1
+    self.last_hallucination_score = {}
     
     # HALLUCINATION TRACKING:
     # Initialize hallucination tracking for all personas
@@ -463,12 +474,21 @@ class ReverieServer:
                                                           .scratch.chat)
             
             # HALLUCINATION ANALYSIS:
-            # Calculate hallucination metrics for this persona at this step
-            try:
-              hallucination_report = self._calculate_persona_hallucination(persona, self.step)
-              movements["persona"][persona_name]["hallucination_score"] = hallucination_report["scores"]["overall"]
-            except Exception as e:
-              print(f"[Warning] Hallucination calculation failed for {persona_name}: {e}")
+            # Can be throttled for faster long-running simulations.
+            if self.hallucination_enabled:
+              if (self.hallucination_interval > 0
+                  and self.step % self.hallucination_interval == 0):
+                try:
+                  hallucination_report = self._calculate_persona_hallucination(
+                    persona, self.step)
+                  self.last_hallucination_score[persona_name] = (
+                    hallucination_report["scores"]["overall"])
+                except Exception as e:
+                  print(f"[Warning] Hallucination calculation failed for {persona_name}: {e}")
+
+              if persona_name in self.last_hallucination_score:
+                movements["persona"][persona_name]["hallucination_score"] = (
+                  self.last_hallucination_score[persona_name])
 
           # Include the meta information about the current stage in the 
           # movements dictionary. 
@@ -481,7 +501,9 @@ class ReverieServer:
           # {"persona": {"Maria Lopez": {"movement": [58, 9]}},
           #  "persona": {"Klaus Mueller": {"movement": [38, 12]}}, 
           #  "meta": {curr_time: <datetime>}}
-          self._save_live_persona_state(self.step)
+          if (self.live_state_save_interval > 0
+              and self.step % self.live_state_save_interval == 0):
+            self._save_live_persona_state(self.step)
           curr_move_file = f"{sim_folder}/movement/{self.step}.json"
           create_folder_if_not_there(curr_move_file)
           with open(curr_move_file, "w") as outfile: 
@@ -492,8 +514,9 @@ class ReverieServer:
           self.step += 1
           self.curr_time += datetime.timedelta(seconds=self.sec_per_step)
           
-          # Save hallucination analysis every 10 steps to maintain a log
-          if self.step % 10 == 0:
+          if (self.hallucination_enabled
+              and self.hallucination_save_interval > 0
+              and self.step % self.hallucination_save_interval == 0):
             self._save_hallucination_report()
 
           int_counter -= 1
@@ -690,23 +713,52 @@ class ReverieServer:
   
   def _calculate_persona_hallucination(self, persona, step):
     """
-    Calculate hallucination metrics for a persona at the current step.
-    Logs the result to hallucination history.
-    
-    INPUT:
-      persona: The Persona instance
-      step: Current simulation step number
-    OUTPUT:
-      hallucination_report: Dict with scores and inconsistencies
+    Extended hallucination report:
+      1. Keyword coherence (HallucinationCalculator - existing)
+      2. Conversation fact-check (ConversationFactChecker - new)
+      3. Memory provenance check (MemoryProvenanceChecker - new, every 50 steps)
     """
+    from pathlib import Path
+    from persona.prompt_template.hallucination_extensions import (
+      ConversationFactChecker,
+      MemoryProvenanceChecker,
+    )
+
+    # -- 1. existing keyword coherence check --
     calculator = HallucinationCalculator(persona)
     report = calculator.get_report()
-    
-    # Store in history
+
+    # -- 2. conversation fact-check (only when a conversation just happened) --
+    if persona.scratch.chat:
+      try:
+        checker = ConversationFactChecker(persona)
+        convo_result = checker.check(persona.scratch.chat)
+        report["conversation_check"] = convo_result
+        if convo_result["violation_count"] > 0:
+          report["scores"]["conversation"] = convo_result["score"]
+      except Exception as e:
+        print(f"[Warning] ConversationFactChecker failed for {persona.name}: {e}")
+
+    # -- 3. memory provenance check (every 50 steps - embedding arithmetic only) --
+    if step % 50 == 0:
+      try:
+        sim_storage = Path(f"{fs_storage}/{self.sim_code}")
+        prov_checker = MemoryProvenanceChecker(
+          persona=persona,
+          sim_storage=sim_storage,
+          sec_per_step=self.sec_per_step,
+          start_time=self.start_time,
+        )
+        prov_result = prov_checker.check()
+        report["provenance_check"] = prov_result
+        report["scores"]["provenance"] = prov_result["score"]
+      except Exception as e:
+        print(f"[Warning] MemoryProvenanceChecker failed for {persona.name}: {e}")
+
+    # -- store in history --
     if persona.name not in self.hallucination_history:
       self.hallucination_history[persona.name] = []
-    
-    # Create history entry with step info
+
     history_entry = {
       "step": step,
       "timestamp": report["timestamp"],

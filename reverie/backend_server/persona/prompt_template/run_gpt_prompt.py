@@ -2151,18 +2151,29 @@ def run_gpt_prompt_focal_pt(persona, statements, n, test_input=None, verbose=Fal
 
   # ChatGPT Plugin ===========================================================
   def __chat_func_clean_up(gpt_response, prompt=""): ############
-    ret = ast.literal_eval(gpt_response)
-    return ret
+    if isinstance(gpt_response, list):
+      ret = gpt_response
+    elif isinstance(gpt_response, str):
+      parsed = ast.literal_eval(gpt_response.strip())
+      if not isinstance(parsed, (list, tuple)):
+        raise ValueError("Expected list output for focal points")
+      ret = list(parsed)
+    else:
+      raise ValueError("Unsupported response type for focal points")
+
+    cleaned = [str(item).strip() for item in ret if str(item).strip()]
+    if not cleaned:
+      raise ValueError("Empty focal point list")
+    return cleaned
 
   def __chat_func_validate(gpt_response, prompt=""): ############
     try: 
-      __func_clean_up(gpt_response, prompt)
+      __chat_func_clean_up(gpt_response, prompt)
       return True
     except:
       return False 
 
 
-  print ("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 12") ########
   gpt_param = {"engine": "text-davinci-002", "max_tokens": 15, 
                "temperature": 0, "top_p": 1, "stream": False,
                "frequency_penalty": 0, "presence_penalty": 0, "stop": None}

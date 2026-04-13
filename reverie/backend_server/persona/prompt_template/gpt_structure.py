@@ -194,7 +194,7 @@ def GPT4_safe_generate_response(prompt,
   prompt = 'GPT-3 Prompt:\n"""\n' + prompt + '\n"""\n'
   prompt += f"Output the response to the prompt above in json. {special_instruction}\n"
   prompt += "Example output json:\n"
-  prompt += '{"output": "' + str(example_output) + '"}'
+  prompt += json.dumps({"output": example_output})
 
   if verbose: 
     print ("CHAT GPT PROMPT")
@@ -236,7 +236,7 @@ def ChatGPT_safe_generate_response(prompt,
   prompt = '"""\n' + prompt + '\n"""\n'
   prompt += f"Output the response to the prompt above in json. {special_instruction}\n"
   prompt += "Example output json:\n"
-  prompt += '{"output": "' + str(example_output) + '"}'
+  prompt += json.dumps({"output": example_output})
 
   if verbose: 
     print ("CHAT GPT PROMPT")

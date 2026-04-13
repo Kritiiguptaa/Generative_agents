@@ -6,6 +6,7 @@ Description: This defines the "Plan" module for generative agents.
 """
 import datetime
 import math
+import os
 import random 
 import sys
 import time
@@ -310,6 +311,10 @@ def generate_convo_summary(persona, convo):
 
 
 def generate_decide_to_talk(init_persona, target_persona, retrieved): 
+  force_interaction = os.getenv("FORCE_AGENT_INTERACTION", "").lower()
+  if force_interaction in {"1", "true", "yes", "on"}:
+    return True
+
   x =run_gpt_prompt_decide_to_talk(init_persona, target_persona, retrieved)[0]
   if debug: print ("GNS FUNCTION: <generate_decide_to_talk>")
 
@@ -735,6 +740,24 @@ def _should_react(persona, retrieved, personas):
               <Persona> instance as values. 
   """
   def lets_talk(init_persona, target_persona, retrieved):
+    force_interaction = os.getenv("FORCE_AGENT_INTERACTION", "").lower()
+    force_interaction = force_interaction in {"1", "true", "yes", "on"}
+
+    if (target_persona.name in init_persona.scratch.chatting_with_buffer):
+      if init_persona.scratch.chatting_with_buffer[target_persona.name] > 0:
+        return False
+
+    if force_interaction:
+      if (not target_persona.scratch.act_address
+          or not target_persona.scratch.act_description
+          or not init_persona.scratch.act_address
+          or not init_persona.scratch.act_description):
+        return False
+      if (target_persona.scratch.chatting_with
+          or init_persona.scratch.chatting_with):
+        return False
+      return True
+
     if (not target_persona.scratch.act_address 
         or not target_persona.scratch.act_description
         or not init_persona.scratch.act_address
@@ -886,9 +909,24 @@ def _chat_react(maze, persona, focused_event, reaction_mode, personas):
   target_persona = personas[reaction_mode[9:].strip()]
   curr_personas = [init_persona, target_persona]
 
+  force_interaction = os.getenv("FORCE_AGENT_INTERACTION", "").lower()
+  force_interaction = force_interaction in {"1", "true", "yes", "on"}
+
   # Actually creating the conversation here. 
-  convo, duration_min = generate_convo(maze, init_persona, target_persona)
-  convo_summary = generate_convo_summary(init_persona, convo)
+  if force_interaction:
+    convo = [
+      [init_persona.name,
+       f"Hey {target_persona.name}, quick check-in before I continue my day."],
+      [target_persona.name,
+       f"Hi {init_persona.name}. Good to see you. Let's catch up again later."],
+    ]
+    duration_min = 1
+    convo_summary = (f"{init_persona.name} and {target_persona.name} had a "
+                    f"brief check-in conversation")
+  else:
+    convo, duration_min = generate_convo(maze, init_persona, target_persona)
+    convo_summary = generate_convo_summary(init_persona, convo)
+
   inserted_act = convo_summary
   inserted_act_dur = duration_min
 

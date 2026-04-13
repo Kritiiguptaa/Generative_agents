@@ -216,9 +216,17 @@ def reflect(persona):
 
       # make sure you set the fillings as well
 
-      # print (persona.a_mem.get_last_chat(persona.scratch.chatting_with).node_id)
+      # Chat memory can be absent in edge cases; avoid hard failure.
+      last_chat_node = None
+      if persona.scratch.chatting_with:
+        last_chat_node = persona.a_mem.get_last_chat(persona.scratch.chatting_with)
 
-      evidence = [persona.a_mem.get_last_chat(persona.scratch.chatting_with).node_id]
+      if last_chat_node and hasattr(last_chat_node, "node_id"):
+        evidence = [last_chat_node.node_id]
+      elif persona.a_mem.seq_event:
+        evidence = [persona.a_mem.seq_event[0].node_id]
+      else:
+        evidence = []
 
       planning_thought = generate_planning_thought_on_convo(persona, all_utt)
       planning_thought = f"For {persona.scratch.name}'s planning: {planning_thought}"
