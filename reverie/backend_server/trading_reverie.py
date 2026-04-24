@@ -44,8 +44,25 @@ os.chdir(BACKEND_DIR)
 # ────────────────────────────────────────────────────────────────────────────
 
 from market_environment import MarketEnvironment
+
+# Suppress the noisy debug prints inside reflection_trigger()
+# without touching reflect.py.  We monkey-patch after import.
+import persona.cognitive_modules.reflect as _reflect_mod
+_orig_reflection_trigger = _reflect_mod.reflection_trigger
+def _quiet_reflection_trigger(persona):
+    import builtins
+    _real_print = builtins.print
+    builtins.print = lambda *a, **k: None   # silence during trigger check
+    try:
+        result = _orig_reflection_trigger(persona)
+    finally:
+        builtins.print = _real_print
+    return result
+_reflect_mod.reflection_trigger = _quiet_reflection_trigger
 from market_perceive    import market_perceive, record_trade_fill
 from trading_persona    import TradingPersona
+from trading_daily_plan import ensure_daily_plan, apply_interaction_to_plan, current_focus_str
+from trading_interactions import maybe_interaction
 
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.cognitive_modules.reflect  import reflect
@@ -218,6 +235,56 @@ def execute_trading_action(persona: TradingPersona,
 
 
 # ===========================================================================
+# Stale-context hallucination detector
+# ===========================================================================
+
+def _check_stale_reasoning(reasoning: str, current_step: int,
+                            scripted_news: dict) -> str:
+    """
+    Cheap heuristic: scan the LLM's reasoning for keywords from news headlines
+    that are more than 20 steps old AND have a contradicting headline at a
+    later step.  Returns a warning string if stale context is detected.
+
+    This is intentionally simple — it catches obvious cases like an agent
+    referencing 'earnings beat' (step 5 news) at step 50 when step 30
+    already fired contradicting supply-chain bad news.
+    """
+    if not reasoning:
+        return ""
+
+    reasoning_lower = reasoning.lower()
+
+    # Build a map: keyword → [(step, is_positive)]
+    kw_map: dict = {}
+    for step, (symbol, headline, impact) in scripted_news.items():
+        is_positive = impact > 0
+        for word in headline.lower().split():
+            if len(word) > 5 and word.isalpha():
+                kw_map.setdefault(word, []).append((step, is_positive))
+
+    staleness_warnings = []
+    for word, appearances in kw_map.items():
+        if word not in reasoning_lower:
+            continue
+        for news_step, is_positive in appearances:
+            age = current_step - news_step
+            if age < 20:
+                continue
+            # Check if a contradicting event for the same keyword exists
+            # at a more recent step
+            for other_step, other_positive in appearances:
+                if other_step > news_step and other_positive != is_positive:
+                    if current_step - other_step < age:
+                        staleness_warnings.append(
+                            f"'{word}' (from step {news_step}, "
+                            f"{age} steps ago; contradicted at step {other_step})"
+                        )
+                        break
+
+    return "; ".join(staleness_warnings[:2]) if staleness_warnings else ""
+
+
+# ===========================================================================
 # Simulation class
 # ===========================================================================
 
@@ -234,7 +301,7 @@ class TradingReverie:
         sim_path  = Path(self.sim_folder)
         if not sim_path.exists():
             shutil.copytree(fork_path, sim_path)
-            print(f"[TradingReverie] Forked '{fork_sim_code}' → '{sim_code}'")
+            print(f"[TradingReverie] Forked '{fork_sim_code}' -> '{sim_code}'")
 
         # Load meta
         meta_path = sim_path / "reverie" / "meta.json"
@@ -254,6 +321,10 @@ class TradingReverie:
                     p.s_mem.add_known_agent(other)
             self.personas[name] = p
 
+        # Initialize daily plans for each agent
+        for persona in self.personas.values():
+            ensure_daily_plan(persona, self.market, force=True)
+
         print(f"[TradingReverie] Loaded {len(self.personas)} agents: "
               f"{list(self.personas.keys())}")
         for name, p in self.personas.items():
@@ -265,6 +336,7 @@ class TradingReverie:
 
     def run(self, n_steps: int) -> list:
         log = []
+        interactions = []
         sim_path = Path(self.sim_folder)
 
         for _ in range(n_steps):
@@ -278,6 +350,23 @@ class TradingReverie:
             if events:
                 print(f"  Market events: "
                       + " | ".join(e.description[:50] for e in events))
+
+            # ── 1.5. Daily plans (refresh on day rollover) ─────────────────
+            for persona in self.personas.values():
+                ensure_daily_plan(persona, self.market)
+
+            # ── 1.6. Peer interaction (cadence-based) ─────────────────────
+            interaction = maybe_interaction(self.personas, self.market, step)
+            if interaction:
+                for agent_name in interaction.get("agents", []):
+                    apply_interaction_to_plan(
+                        self.personas[agent_name], interaction.get("summary", "")
+                    )
+                interactions.append({"step": step, **interaction})
+                print(
+                    f"  [Interaction] {interaction['agents'][0]} + "
+                    f"{interaction['agents'][1]}: {interaction['summary']}"
+                )
 
             for name, persona in self.personas.items():
                 try:
@@ -297,7 +386,16 @@ class TradingReverie:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w", encoding="utf-8") as f:
             json.dump(log, f, indent=2)
-        print(f"\n[Done] {n_steps} steps complete. Log → {log_path}")
+
+        interactions_path = sim_path / "reverie" / "trading_interactions.json"
+        with open(interactions_path, "w", encoding="utf-8") as f:
+            json.dump(interactions, f, indent=2)
+
+        report = self._generate_report(log, n_steps)
+        report_path = sim_path / "reverie" / "hallucination_report.json"
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        self._print_report(report)
         return log
 
     # -----------------------------------------------------------------------
@@ -306,6 +404,10 @@ class TradingReverie:
                     events: list, step: int, log: list):
         """Run one cognitive cycle for a single agent."""
 
+        # Keep persona's internal clock in sync with market time.
+        # reflect() and memory nodes use this for timestamps.
+        persona.scratch.curr_time = self.market.current_time
+
         # 2. Perceive
         market_perceive(persona, self.market, events)
 
@@ -313,9 +415,11 @@ class TradingReverie:
         reflect(persona)
 
         # 4. Retrieve — two focal points per agent per step
+        focus = current_focus_str(persona, self.market)
         focal_points = [
             f"What should {name} trade right now?",
             f"Recent price action for {', '.join(persona.scratch.watchlist[:2])}",
+            f"Current plan focus: {focus}",
         ]
         retrieved = new_retrieve(persona, focal_points, n_count=15)
 
@@ -327,25 +431,163 @@ class TradingReverie:
         # 6. Execute (with action filtering)
         result = execute_trading_action(persona, self.market, decision)
         outcome = result["outcome_str"]
-        print(f"  [{name}] {outcome}")
+
+        # Print with clear hallucination markers
+        if result["filtered"]:
+            print(f"  [{name}] *** HALLUCINATION CAUGHT *** {outcome}")
+        else:
+            print(f"  [{name}] {outcome}")
 
         # 7. Record fill in memory
         if result["fill"] and not result["filtered"]:
             record_trade_fill(persona, self.market, result["fill"])
 
-        # 8. Log
+        # 8. Detect stale-news hallucination:
+        # If agent cites reasoning that references a news headline older than
+        # 20 steps while a contradicting headline exists in memory, flag it.
+        reasoning = decision.get("reasoning", "")
+        stale_flag = _check_stale_reasoning(
+            reasoning, step, self.market.SCRIPTED_NEWS
+        )
+        if stale_flag:
+            print(f"  [{name}] *** STALE CONTEXT *** reasoning may reference "
+                  f"outdated news: {stale_flag}")
+
+        # 9. Log
         pv = persona.portfolio_value(self.market.current_prices)
         log.append({
-            "step":            step,
-            "agent":           name,
-            "decision":        decision,
-            "outcome":         outcome,
-            "filtered":        result["filtered"],
-            "cash":            round(persona.scratch.cash_balance, 2),
-            "portfolio_value": pv,
-            "positions":       {s: dict(p) for s, p in persona.scratch.positions.items()},
-            "market_prices":   dict(self.market.current_prices),
+            "step":             step,
+            "agent":            name,
+            "decision":         decision,
+            "outcome":          outcome,
+            "hallucination":    result["filtered"],
+            "stale_context":    stale_flag,
+            "cash":             round(persona.scratch.cash_balance, 2),
+            "portfolio_value":  pv,
+            "positions":        {s: dict(p)
+                                 for s, p in persona.scratch.positions.items()},
+            "market_prices":    dict(self.market.current_prices),
         })
+
+    # -----------------------------------------------------------------------
+
+    def _generate_report(self, log: list, n_steps: int) -> dict:
+        """
+        Compute hallucination metrics from the trading log.
+
+        Hallucination types tracked:
+          1. action_hallucination  — LLM requested an impossible trade
+             (insufficient cash, selling unowned stock, over risk-limit)
+          2. stale_context         — LLM reasoning cited outdated contradicted news
+
+        Returns a dict suitable for JSON serialisation.
+        """
+        from collections import defaultdict
+
+        agents = list(self.personas.keys())
+        per_agent = {
+            name: {
+                "total_decisions":       0,
+                "active_decisions":      0,  # buy or sell (not hold/analyze)
+                "action_hallucinations": 0,
+                "stale_context_hits":    0,
+                "action_counts":         {"buy": 0, "sell": 0,
+                                          "hold": 0, "analyze": 0},
+                "start_portfolio":       0.0,
+                "end_portfolio":         0.0,
+            }
+            for name in agents
+        }
+
+        # Capture start portfolio from first log entry per agent
+        seen_start = set()
+        for entry in log:
+            name = entry["agent"]
+            if name not in seen_start:
+                per_agent[name]["start_portfolio"] = entry["portfolio_value"]
+                seen_start.add(name)
+
+        for entry in log:
+            name   = entry["agent"]
+            action = entry["decision"].get("action", "hold")
+            ag     = per_agent[name]
+
+            ag["total_decisions"] += 1
+            ag["action_counts"][action] = ag["action_counts"].get(action, 0) + 1
+
+            if action in ("buy", "sell"):
+                ag["active_decisions"] += 1
+
+            if entry.get("hallucination"):
+                ag["action_hallucinations"] += 1
+
+            if entry.get("stale_context"):
+                ag["stale_context_hits"] += 1
+
+            # Last seen entry = end state
+            ag["end_portfolio"] = entry["portfolio_value"]
+
+        # Compute rates
+        summary = {}
+        total_hallucinations = 0
+        for name, ag in per_agent.items():
+            active = ag["active_decisions"] or 1   # avoid /0
+            total  = ag["total_decisions"]  or 1
+
+            action_h_rate  = round(ag["action_hallucinations"] / active * 100, 1)
+            stale_rate     = round(ag["stale_context_hits"]    / total  * 100, 1)
+            pnl            = round(ag["end_portfolio"] - ag["start_portfolio"], 2)
+
+            summary[name] = {
+                "total_decisions":          ag["total_decisions"],
+                "active_decisions":         ag["active_decisions"],
+                "action_hallucinations":    ag["action_hallucinations"],
+                "action_hallucination_rate_pct": action_h_rate,
+                "stale_context_hits":       ag["stale_context_hits"],
+                "stale_context_rate_pct":   stale_rate,
+                "action_distribution":      ag["action_counts"],
+                "start_portfolio_usd":      ag["start_portfolio"],
+                "end_portfolio_usd":        ag["end_portfolio"],
+                "pnl_usd":                  pnl,
+            }
+            total_hallucinations += ag["action_hallucinations"]
+
+        total_decisions = sum(a["total_decisions"] for a in per_agent.values()) or 1
+        return {
+            "simulation_steps":            n_steps,
+            "total_log_entries":           len(log),
+            "total_hallucinations":        total_hallucinations,
+            "overall_hallucination_rate_pct":
+                round(total_hallucinations / total_decisions * 100, 1),
+            "per_agent": summary,
+        }
+
+    def _print_report(self, report: dict):
+        sep = "=" * 60
+        print(f"\n{sep}")
+        print("HALLUCINATION REPORT")
+        print(sep)
+        print(f"Steps simulated : {report['simulation_steps']}")
+        print(f"Total decisions : {report['total_log_entries']}")
+        print(f"Total hallucinations : {report['total_hallucinations']}  "
+              f"({report['overall_hallucination_rate_pct']}% of all decisions)")
+        print()
+        for name, ag in report["per_agent"].items():
+            print(f"  {name}")
+            print(f"    Decisions      : {ag['total_decisions']}  "
+                  f"(active={ag['active_decisions']})")
+            print(f"    Action hallucinations : {ag['action_hallucinations']}  "
+                  f"({ag['action_hallucination_rate_pct']}% of active)")
+            print(f"    Stale context hits    : {ag['stale_context_hits']}  "
+                  f"({ag['stale_context_rate_pct']}% of decisions)")
+            dist = ag["action_distribution"]
+            print(f"    Actions        : buy={dist.get('buy',0)}  "
+                  f"sell={dist.get('sell',0)}  hold={dist.get('hold',0)}  "
+                  f"analyze={dist.get('analyze',0)}")
+            print(f"    Portfolio PnL  : ${ag['pnl_usd']:+,.2f}  "
+                  f"(${ag['start_portfolio_usd']:,.0f} -> ${ag['end_portfolio_usd']:,.0f})")
+            print()
+        print(sep)
 
     # -----------------------------------------------------------------------
 
