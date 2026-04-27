@@ -1,0 +1,13 @@
+{
+  "fork_sim_code": "base_trading",
+  "start_date": "January 15, 2024",
+  "curr_time": "January 15, 2024, 09:30:00",
+  "sec_per_step": 300,
+  "maze_name": "trading_market",
+  "persona_names": [
+    "Alex Chen",
+    "Marcus Webb",
+    "Sara Kim"
+  ],
+  "step": 0
+}

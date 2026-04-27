@@ -1,0 +1,35 @@
+{
+  "known_stocks": {
+    "NVDA": {
+      "sector": "semiconductors",
+      "last_known_price": 487.0,
+      "notes": [
+        "Strong AI tailwinds — data center GPU demand accelerating",
+        "Currently hold 200 shares, avg cost $487"
+      ]
+    },
+    "AAPL": {
+      "sector": "consumer technology",
+      "last_known_price": 172.0,
+      "notes": [
+        "Stable compounder, low volatility — useful for portfolio balance"
+      ]
+    },
+    "AMD": {
+      "sector": "semiconductors",
+      "last_known_price": 178.0,
+      "notes": [
+        "Potential NVDA hedge if supply tightens — watching for entry"
+      ]
+    },
+    "GOOGL": {
+      "sector": "internet / AI",
+      "last_known_price": 141.0,
+      "notes": [
+        "AI optionality underpriced relative to Microsoft — considering position"
+      ]
+    }
+  },
+  "known_agents": ["Marcus Webb", "Sara Kim"],
+  "market_context": "Soft landing narrative intact. Fed pausing. AI spending cycle early innings. Semiconductor sector in strong uptrend."
+}

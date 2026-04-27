@@ -1,0 +1,29 @@
+{
+  "known_stocks": {
+    "TSLA": {
+      "sector": "electric vehicles",
+      "last_known_price": 245.0,
+      "notes": [
+        "High volatility — good for day trading",
+        "Elon tweets can move it 10% overnight"
+      ]
+    },
+    "NVDA": {
+      "sector": "semiconductors",
+      "last_known_price": 487.0,
+      "notes": [
+        "AI hype stock — only goes up",
+        "Want to buy 100 shares on any dip"
+      ]
+    },
+    "AMD": {
+      "sector": "semiconductors",
+      "last_known_price": 178.0,
+      "notes": [
+        "Poor mans NVDA — cheaper way to play AI chips"
+      ]
+    }
+  },
+  "known_agents": ["Alex Chen", "Sara Kim"],
+  "market_context": "Bull market. Buy every dip. NVDA and TSLA are going to the moon."
+}

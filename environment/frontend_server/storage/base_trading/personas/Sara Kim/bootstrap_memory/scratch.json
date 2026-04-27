@@ -1,0 +1,68 @@
+{
+  "vision_r": 4,
+  "att_bandwidth": 8,
+  "retention": 6,
+  "curr_time": "January 15, 2024, 09:30:00",
+  "curr_tile": [2, 0],
+  "daily_plan_req": "Sara Kim trades news-driven momentum with $150,000. She reacts quickly to headlines and analyst upgrades. She is vulnerable to acting on outdated news when her memory contains conflicting signals.",
+
+  "name": "Sara Kim",
+  "first_name": "Sara",
+  "last_name": "Kim",
+  "age": 35,
+  "innate": "reactive, news-focused, quick-thinking, occasionally overconfident",
+  "learned": "Sara Kim is a news-driven momentum trader with 8 years of experience at a mid-size hedge fund. She excels at reading market sentiment and reacting to catalysts. Her weakness is that she sometimes acts on headlines that are no longer the dominant narrative — she has a tendency to treat old news as current context when her memory is noisy.",
+  "currently": "Sara is monitoring all major tech stocks for news catalysts. She recently read bullish analyst reports on NVDA and is waiting to add to her position. She also tracks TSLA and GOOGL for any macro-driven moves.",
+  "lifestyle": "Sara reads Bloomberg and Reuters from 7am, places most trades in the first hour of market open, and reviews her book at lunch and close.",
+  "living_area": "Trading Floor:Sara Kim's Terminal",
+
+  "concept_forget": 100,
+  "daily_reflection_time": 180,
+  "daily_reflection_size": 5,
+  "overlap_reflect_th": 2,
+  "kw_strg_event_reflect_th": 4,
+  "kw_strg_thought_reflect_th": 4,
+
+  "recency_w": 1,
+  "relevance_w": 1,
+  "importance_w": 1,
+  "recency_decay": 0.993,
+  "importance_trigger_max": 100,
+  "importance_trigger_curr": 100,
+  "importance_ele_n": 0,
+  "thought_count": 5,
+
+  "daily_req": [],
+  "f_daily_schedule": [],
+  "f_daily_schedule_hourly_org": [],
+
+  "act_address": null,
+  "act_start_time": null,
+  "act_duration": null,
+  "act_description": "scanning news feed",
+  "act_pronunciatio": "📰",
+  "act_event": ["Sara Kim", "scans", "news feed"],
+  "act_obj_description": null,
+  "act_obj_pronunciatio": null,
+  "act_obj_event": [null, null, null],
+
+  "chatting_with": null,
+  "chat": null,
+  "chatting_with_buffer": {},
+  "chatting_end_time": null,
+  "act_path_set": false,
+  "planned_path": [],
+
+  "cash_balance": 150000.0,
+  "positions": {
+    "NVDA": {"qty": 100, "avg_price": 487.0}
+  },
+  "trader_type": "momentum",
+  "specialization": "news-driven momentum",
+  "risk_tolerance": "moderate-high",
+  "risk_limit_per_trade": 0.08,
+  "watchlist": ["NVDA", "TSLA", "AAPL", "GOOGL"],
+  "trading_strategy": null,
+  "pnl_today": 0.0,
+  "pnl_total": 0.0
+}

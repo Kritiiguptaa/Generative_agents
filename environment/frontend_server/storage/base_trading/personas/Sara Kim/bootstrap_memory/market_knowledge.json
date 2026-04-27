@@ -1,0 +1,35 @@
+{
+  "known_stocks": {
+    "NVDA": {
+      "sector": "semiconductors",
+      "last_known_price": 487.0,
+      "notes": [
+        "Earnings beat expected — AI supercycle thesis intact",
+        "Currently hold 100 shares, avg cost $487"
+      ]
+    },
+    "TSLA": {
+      "sector": "electric vehicles",
+      "last_known_price": 245.0,
+      "notes": [
+        "High beta to macro sentiment — good news-driven play"
+      ]
+    },
+    "AAPL": {
+      "sector": "consumer technology",
+      "last_known_price": 172.0,
+      "notes": [
+        "Services revenue growing — regulatory risk is the main overhang"
+      ]
+    },
+    "GOOGL": {
+      "sector": "internet / AI",
+      "last_known_price": 141.0,
+      "notes": [
+        "DeepMind developments could be a major catalyst"
+      ]
+    }
+  },
+  "known_agents": ["Alex Chen", "Marcus Webb"],
+  "market_context": "Watching for news catalysts on semis and EV names. Fed language is the macro wildcard. Staying nimble."
+}
