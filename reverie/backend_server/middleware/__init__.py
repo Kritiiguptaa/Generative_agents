@@ -1,6 +1,10 @@
 # middleware/__init__.py
 
-from .middleware_wrapper import MiddlewareWrapper
+try:
+    from .middleware_wrapper import MiddlewareWrapper
+except ImportError:
+    MiddlewareWrapper = None
+
 from .config.middleware_config import load_middleware_config
 
 __all__ = [

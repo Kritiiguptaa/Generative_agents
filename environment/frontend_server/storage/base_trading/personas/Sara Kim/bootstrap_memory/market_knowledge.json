@@ -2,29 +2,29 @@
   "known_stocks": {
     "NVDA": {
       "sector": "semiconductors",
-      "last_known_price": 487.0,
+      "last_known_price": 192.2,
       "notes": [
         "Earnings beat expected — AI supercycle thesis intact",
-        "Currently hold 100 shares, avg cost $487"
+        "Currently hold 100 shares, avg cost $192.20"
       ]
     },
     "TSLA": {
       "sector": "electric vehicles",
-      "last_known_price": 245.0,
+      "last_known_price": 371.18,
       "notes": [
         "High beta to macro sentiment — good news-driven play"
       ]
     },
     "AAPL": {
       "sector": "consumer technology",
-      "last_known_price": 172.0,
+      "last_known_price": 275.21,
       "notes": [
         "Services revenue growing — regulatory risk is the main overhang"
       ]
     },
     "GOOGL": {
       "sector": "internet / AI",
-      "last_known_price": 141.0,
+      "last_known_price": 339.91,
       "notes": [
         "DeepMind developments could be a major catalyst"
       ]

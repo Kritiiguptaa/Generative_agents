@@ -7,6 +7,18 @@ static_dirs/*
 !storage/base_the_ville_isabella_maria_klaus/*
 !storage/base_the_ville_n25/*
 
+!environment/frontend_server/storage/base_trading/
+!environment/frontend_server/storage/base_trading/**
+
+!environment/frontend_server/storage/base_trading_the_ville/
+!environment/frontend_server/storage/base_trading_the_ville/**
+
+!storage/base_trading/
+!storage/base_trading/**
+
+!storage/base_trading_the_ville/
+!storage/base_trading_the_ville/**
+
 bin/
 include/
 pip-selfcheck.json

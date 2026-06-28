@@ -2,31 +2,37 @@
   "known_stocks": {
     "NVDA": {
       "sector": "semiconductors",
-      "last_known_price": 487.0,
+      "last_known_price": 192.2,
       "notes": [
         "Strong AI tailwinds — data center GPU demand accelerating",
-        "Currently hold 200 shares, avg cost $487"
+        "Currently hold 200 shares at avg cost $192.20 — position value $38,440",
+        "Represents 8.7% of total portfolio — well within concentration limit of 25%",
+        "Do not add more NVDA without trimming elsewhere first"
       ]
     },
     "AAPL": {
       "sector": "consumer technology",
-      "last_known_price": 172.0,
+      "last_known_price": 275.21,
       "notes": [
-        "Stable compounder, low volatility — useful for portfolio balance"
+        "Stable compounder, low volatility — useful for portfolio balance",
+        "Max buy at current price: 54 shares within $15,000 trade limit"
       ]
     },
     "AMD": {
       "sector": "semiconductors",
-      "last_known_price": 178.0,
+      "last_known_price": 512.63,
       "notes": [
-        "Potential NVDA hedge if supply tightens — watching for entry"
+        "Potential NVDA hedge if supply tightens — watching for entry",
+        "Max buy at current price: 29 shares within $15,000 trade limit",
+        "Do not enter until supply tightening is confirmed in news"
       ]
     },
     "GOOGL": {
       "sector": "internet / AI",
-      "last_known_price": 141.0,
+      "last_known_price": 339.91,
       "notes": [
-        "AI optionality underpriced relative to Microsoft — considering position"
+        "AI optionality underpriced relative to Microsoft — considering position",
+        "Max buy at current price: 44 shares within $15,000 trade limit"
       ]
     }
   },

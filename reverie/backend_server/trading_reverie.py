@@ -35,6 +35,12 @@ import sys
 import traceback
 from pathlib import Path
 
+# Windows' default console codepage (cp1252) can't encode the box-drawing
+# characters used in this file's progress output -- force UTF-8 so prints
+# don't crash mid-run.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # ── path setup ──────────────────────────────────────────────────────────────
 THIS_FILE   = Path(__file__).resolve()
 BACKEND_DIR = THIS_FILE.parent
@@ -44,6 +50,7 @@ os.chdir(BACKEND_DIR)
 # ────────────────────────────────────────────────────────────────────────────
 
 from market_environment import MarketEnvironment
+from historical_market_environment import HistoricalMarketEnvironment
 
 # Suppress the noisy debug prints inside reflection_trigger()
 # without touching reflect.py.  We monkey-patch after import.
@@ -63,6 +70,7 @@ from market_perceive    import market_perceive, record_trade_fill
 from trading_persona    import TradingPersona
 from trading_daily_plan import ensure_daily_plan, apply_interaction_to_plan, current_focus_str
 from trading_interactions import maybe_interaction
+from middleware.action_filtering import run_action_filtering_step
 
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.cognitive_modules.reflect  import reflect
@@ -76,7 +84,8 @@ from utils import fs_storage
 
 def make_trading_decision(persona: TradingPersona,
                           market:  MarketEnvironment,
-                          retrieved: dict) -> dict:
+                          retrieved: dict,
+                          action_log_path: str) -> dict:
     """
     Ask the LLM to decide what to do next.
     Returns {"action", "symbol", "quantity", "reasoning"}.
@@ -92,43 +101,16 @@ def make_trading_decision(persona: TradingPersona,
             memory_lines.append(f"- {node.description}")
     memory_context = "\n".join(memory_lines) if memory_lines else "No relevant memories."
 
-    prompt = f"""You are {persona.scratch.name}, a {persona.scratch.trader_type} trader.
-Traits: {persona.scratch.innate}
-Background: {persona.scratch.learned}
-Current situation: {persona.scratch.currently}
-Risk tolerance: {persona.scratch.risk_tolerance}
-Max single-trade size: {persona.scratch.risk_limit_per_trade*100:.0f}% of portfolio
+    def _call_llm(prompt: str) -> str:
+        return ollama_request(prompt, max_tokens=120, stop=["\n\n"], timeout=300)
 
-MARKET — Step {market.step} | {market.current_time.strftime('%Y-%m-%d %H:%M')}
-{market.prices_str()}
-
-YOUR PORTFOLIO
-{persona.position_summary(market.current_prices)}
-
-RELEVANT MEMORIES (most recent first)
-{memory_context}
-
-Based on your analysis, decide your next action.
-Respond ONLY with valid JSON, no markdown, no extra text:
-{{"action": "buy" or "sell" or "hold" or "analyze",
-  "symbol": "TICKER or null",
-  "quantity": integer or null,
-  "reasoning": "one sentence"}}"""
-
-    raw = ollama_request(prompt, max_tokens=120, stop=["\n\n"], timeout=300)
-
-    # Parse — fall back to hold if LLM output is malformed
-    try:
-        # Strip markdown fences if the model wraps the JSON
-        cleaned = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-        decision = json.loads(cleaned)
-        if decision.get("action") not in ("buy", "sell", "hold", "analyze"):
-            raise ValueError("unknown action")
-        return decision
-    except Exception:
-        print(f"  [LLM parse error for {persona.name}] raw: {raw[:120]!r}")
-        return {"action": "hold", "symbol": None, "quantity": None,
-                "reasoning": "Could not parse LLM response — defaulting to hold."}
+    return run_action_filtering_step(
+        persona,
+        market,
+        memory_context,
+        _call_llm,
+        action_log_path,
+    )
 
 
 # ===========================================================================
@@ -294,7 +276,10 @@ class TradingReverie:
         self.sim_code      = sim_code
         self.fork_sim_code = fork_sim_code
         self.sim_folder    = f"{fs_storage}/{sim_code}"
-        self.market        = MarketEnvironment(seed=42)
+        self.market        = HistoricalMarketEnvironment(seed=42)
+        self.action_filter_log_path = str(
+            Path(self.sim_folder) / "reverie" / "action_filter_log.csv"
+        )
 
         # Copy base simulation folder if target doesn't exist yet
         fork_path = Path(f"{fs_storage}/{fork_sim_code}")
@@ -424,7 +409,12 @@ class TradingReverie:
         retrieved = new_retrieve(persona, focal_points, n_count=15)
 
         # 5. Decide  ← middleware compression / anchoring hooks go here
-        decision = make_trading_decision(persona, self.market, retrieved)
+        decision = make_trading_decision(
+            persona,
+            self.market,
+            retrieved,
+            self.action_filter_log_path,
+        )
         print(f"  [{name}] decision: {decision.get('action','?')} "
               f"{decision.get('symbol','')} x{decision.get('quantity','')}")
 

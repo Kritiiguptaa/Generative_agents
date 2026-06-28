@@ -2,19 +2,76 @@
   "vision_r": 4,
   "att_bandwidth": 8,
   "retention": 6,
-  "curr_time": "January 15, 2024, 09:30:00",
+  "curr_time": "January 15, 2024, 07:00:00",
   "curr_tile": [2, 0],
-  "daily_plan_req": "Sara Kim trades news-driven momentum with $150,000. She reacts quickly to headlines and analyst upgrades. She is vulnerable to acting on outdated news when her memory contains conflicting signals.",
 
   "name": "Sara Kim",
   "first_name": "Sara",
   "last_name": "Kim",
   "age": 35,
   "innate": "reactive, news-focused, quick-thinking, occasionally overconfident",
-  "learned": "Sara Kim is a news-driven momentum trader with 8 years of experience at a mid-size hedge fund. She excels at reading market sentiment and reacting to catalysts. Her weakness is that she sometimes acts on headlines that are no longer the dominant narrative — she has a tendency to treat old news as current context when her memory is noisy.",
-  "currently": "Sara is monitoring all major tech stocks for news catalysts. She recently read bullish analyst reports on NVDA and is waiting to add to her position. She also tracks TSLA and GOOGL for any macro-driven moves.",
+
+  "learned": "Sara Kim is a news-driven momentum trader with 8 years of experience at a mid-size hedge fund. She excels at reading market sentiment and reacting to catalysts. Her weakness is that she sometimes acts on headlines that are no longer the dominant narrative.",
+
+  "currently": "Sara is holding 100 shares of NVDA at avg cost $192.20. She read a bullish analyst report this morning and is considering adding 50 more shares if price holds above $191. Her stop loss on NVDA is at $185. She has no position in TSLA yet but is watching for a catalyst.",
+
   "lifestyle": "Sara reads Bloomberg and Reuters from 7am, places most trades in the first hour of market open, and reviews her book at lunch and close.",
+
   "living_area": "Trading Floor:Sara Kim's Terminal",
+
+  "daily_plan_req": "Sara Kim trades news-driven momentum with $150,000. She reacts quickly to headlines and analyst upgrades. She is vulnerable to acting on outdated news when her memory contains conflicting signals.",
+
+  "daily_req": [
+    "Wake up at 7:00 AM and read Bloomberg and Reuters for pre-market news",
+    "Arrive at trading terminal by 9:00 AM and review overnight positions",
+    "Trade actively from 9:30 AM to 10:30 AM on news catalysts",
+    "Review open positions and PnL at 12:00 PM",
+    "Monitor afternoon tape from 2:00 PM to 3:30 PM",
+    "Close risky positions before 3:45 PM",
+    "Review daily PnL and update trading journal at 4:30 PM"
+  ],
+  "f_daily_schedule": [],
+  "f_daily_schedule_hourly_org": [],
+
+  "trading_strategy": "Buy on positive earnings surprises or analyst upgrades with volume confirmation. Sell when narrative breaks or stop loss triggers at 8% below entry. Never hold a losing position overnight unless thesis is intact.",
+
+  "recent_decisions": [
+    {
+      "timestep": "07:00 AM",
+      "action": "reviewing pre-market news",
+      "reason": "gathering information before market open"
+    }
+  ],
+
+  "active_constraints": {
+    "max_position_size": 200,
+    "max_single_trade_value": 12000,
+    "stop_loss_threshold": 0.08,
+    "no_trade_before": "09:30",
+    "no_new_positions_after": "15:45",
+    "blocked_stocks": [],
+    "short_selling_enabled": false
+  },
+
+  "market_state": {
+    "session": "pre-market",
+    "trend": "bullish",
+    "vix": 18.5,
+    "fed_meeting_this_week": false,
+    "major_events_today": ["CPI data at 8:30 AM"]
+  },
+
+  "cash_balance": 150000.0,
+  "positions": {
+    "NVDA": {"qty": 100, "avg_price": 192.2}
+  },
+  "trader_type": "momentum",
+  "specialization": "news-driven momentum",
+  "risk_tolerance": "moderate-high",
+  "risk_limit_per_trade": 0.08,
+  "watchlist": ["NVDA", "TSLA", "AAPL", "GOOGL"],
+  "pnl_today": 0.0,
+  "pnl_total": 0.0,
 
   "concept_forget": 100,
   "daily_reflection_time": 180,
@@ -22,7 +79,6 @@
   "overlap_reflect_th": 2,
   "kw_strg_event_reflect_th": 4,
   "kw_strg_thought_reflect_th": 4,
-
   "recency_w": 1,
   "relevance_w": 1,
   "importance_w": 1,
@@ -32,16 +88,12 @@
   "importance_ele_n": 0,
   "thought_count": 5,
 
-  "daily_req": [],
-  "f_daily_schedule": [],
-  "f_daily_schedule_hourly_org": [],
-
   "act_address": null,
   "act_start_time": null,
   "act_duration": null,
-  "act_description": "scanning news feed",
-  "act_pronunciatio": "📰",
-  "act_event": ["Sara Kim", "scans", "news feed"],
+  "act_description": "reading pre-market Bloomberg news feed for NVDA and TSLA catalysts",
+  "act_pronunciatio": "📰💹",
+  "act_event": ["Sara Kim", "reads", "Bloomberg terminal"],
   "act_obj_description": null,
   "act_obj_pronunciatio": null,
   "act_obj_event": [null, null, null],
@@ -51,18 +103,5 @@
   "chatting_with_buffer": {},
   "chatting_end_time": null,
   "act_path_set": false,
-  "planned_path": [],
-
-  "cash_balance": 150000.0,
-  "positions": {
-    "NVDA": {"qty": 100, "avg_price": 487.0}
-  },
-  "trader_type": "momentum",
-  "specialization": "news-driven momentum",
-  "risk_tolerance": "moderate-high",
-  "risk_limit_per_trade": 0.08,
-  "watchlist": ["NVDA", "TSLA", "AAPL", "GOOGL"],
-  "trading_strategy": null,
-  "pnl_today": 0.0,
-  "pnl_total": 0.0
+  "planned_path": []
 }
