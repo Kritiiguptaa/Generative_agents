@@ -13,11 +13,31 @@ class MiddlewareConfig:
     # chaos_injection_probability: float = 0.3
     # chaos_step_interval: int = 10
     # random_seed: int = 42
-    
+
     # # ============ STABILIZER SETTINGS ============
     enable_stabilizer: bool = True
     entropy_discard_patterns: Optional[List[str]] = None
     persona_anchor_template: str = (...)
+
+    # ============ MEMORY COMPRESSION SETTINGS ============
+    # Set memory_compression_enabled=False for the ablation baseline arm.
+    memory_compression_enabled: bool = True
+    mc_keep_newest_per_symbol: int = 2       # stage 2: nodes kept per ticker
+    mc_near_duplicate_threshold: float = 0.95  # stage 1: cosine cutoff
+    mc_annotate_superseded: bool = True      # stage 3: age/supersession marks
+    mc_stale_age_steps: int = 20             # stage 3: age before annotating
+    mc_max_memory_tokens: int = 350          # stage 4: prompt budget
+    mc_chars_per_token: int = 4              # token estimator
+
+    # ============ ID-RAG SETTINGS ============
+    id_rag_enabled: bool = True
+    id_rag_top_k: int = 4
+    id_rag_always_include_forbidden: bool = True
+    id_rag_max_context_chars: int = 300
+    id_rag_embed_cache_enabled: bool = True
+    id_rag_dynamic_updates: bool = True
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_embed_model: str = "nomic-embed-text"
     # redundancy_window: int = 5
     # redundancy_threshold: float = 0.85
     

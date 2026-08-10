@@ -70,7 +70,15 @@ from market_perceive    import market_perceive, record_trade_fill
 from trading_persona    import TradingPersona
 from trading_daily_plan import ensure_daily_plan, apply_interaction_to_plan, current_focus_str
 from trading_interactions import maybe_interaction
-from middleware.action_filtering import run_action_filtering_step
+from middleware.action_filtering    import run_action_filtering_step
+from middleware.persona_anchoring   import score_persona_consistency
+from middleware.memory_compression  import compress_memories
+from middleware.id_rag import (
+    id_rag_anchor,
+    update_graph_belief,
+    update_graph_relationship,
+    update_graph_current_situation,
+)
 
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.cognitive_modules.reflect  import reflect
@@ -88,29 +96,32 @@ def make_trading_decision(persona: TradingPersona,
                           action_log_path: str) -> dict:
     """
     Ask the LLM to decide what to do next.
-    Returns {"action", "symbol", "quantity", "reasoning"}.
+    Returns ({"action", "symbol", "quantity", "reasoning"}, compression_stats).
 
-    NOTE: retrieved memories are passed raw here (no middleware compression).
-    This is intentional — it exposes the hallucination problem that your
-    middleware is meant to solve.
+    Middleware applied here, in order:
+      1. compress_memories()  — dedup, prune superseded news, enforce budget
+      2. id_rag_anchor()      — prepend context-relevant identity facts
+      3. action filtering     — constrain the LLM to legal actions
     """
-    # Build memory context from retrieved nodes
-    memory_lines = []
-    for focal_pt, nodes in retrieved.items():
-        for node in nodes[:6]:          # cap at 6 per focal point
-            memory_lines.append(f"- {node.description}")
-    memory_context = "\n".join(memory_lines) if memory_lines else "No relevant memories."
+    # Middleware layer: compress the retrieval output before it reaches the LLM.
+    # Replaces the old arbitrary nodes[:6] truncation.
+    memory_context, mc_stats = compress_memories(retrieved, persona, market)
+
+    # ID-RAG: retrieve only the identity facts relevant to this context
+    # and prepend them. Replaces the static full-block anchor.
+    memory_context = id_rag_anchor(persona, memory_context)
 
     def _call_llm(prompt: str) -> str:
         return ollama_request(prompt, max_tokens=120, stop=["\n\n"], timeout=300)
 
-    return run_action_filtering_step(
+    decision = run_action_filtering_step(
         persona,
         market,
         memory_context,
         _call_llm,
         action_log_path,
     )
+    return decision, mc_stats
 
 
 # ===========================================================================
@@ -352,6 +363,12 @@ class TradingReverie:
                     f"  [Interaction] {interaction['agents'][0]} + "
                     f"{interaction['agents'][1]}: {interaction['summary']}"
                 )
+                # ID-RAG: update relationship nodes for both agents
+                agents_in = interaction.get("agents", [])
+                summary   = interaction.get("summary", "")
+                if len(agents_in) == 2 and summary:
+                    update_graph_relationship(agents_in[0], agents_in[1], summary)
+                    update_graph_relationship(agents_in[1], agents_in[0], summary)
 
             for name, persona in self.personas.items():
                 try:
@@ -397,7 +414,18 @@ class TradingReverie:
         market_perceive(persona, self.market, events)
 
         # 3. Reflect (compresses memory when budget exhausted)
+        # Capture thought count before reflect so we can detect new insights.
+        thoughts_before = len(persona.a_mem.seq_thought)
         reflect(persona)
+        new_thoughts = persona.a_mem.seq_thought[thoughts_before:]
+
+        # ID-RAG dynamic updates after reflect
+        currently = getattr(persona.scratch, "currently", "") or ""
+        update_graph_current_situation(name, currently)
+        for thought_node in new_thoughts:
+            desc = getattr(thought_node, "description", "") or ""
+            if desc:
+                update_graph_belief(name, desc)
 
         # 4. Retrieve — two focal points per agent per step
         focus = current_focus_str(persona, self.market)
@@ -408,8 +436,8 @@ class TradingReverie:
         ]
         retrieved = new_retrieve(persona, focal_points, n_count=15)
 
-        # 5. Decide  ← middleware compression / anchoring hooks go here
-        decision = make_trading_decision(
+        # 5. Decide  ← memory compression + ID-RAG anchoring applied inside
+        decision, mc_stats = make_trading_decision(
             persona,
             self.market,
             retrieved,
@@ -417,6 +445,12 @@ class TradingReverie:
         )
         print(f"  [{name}] decision: {decision.get('action','?')} "
               f"{decision.get('symbol','')} x{decision.get('quantity','')}")
+        if mc_stats.get("enabled") and mc_stats.get("nodes_in"):
+            print(f"  [{name}] compression: {mc_stats['nodes_in']}→"
+                  f"{mc_stats['nodes_out']} nodes "
+                  f"(dup={mc_stats['dropped_duplicate']} "
+                  f"stale={mc_stats['dropped_stale']} "
+                  f"budget={mc_stats['dropped_budget']})")
 
         # 6. Execute (with action filtering)
         result = execute_trading_action(persona, self.market, decision)
@@ -443,20 +477,28 @@ class TradingReverie:
             print(f"  [{name}] *** STALE CONTEXT *** reasoning may reference "
                   f"outdated news: {stale_flag}")
 
+        # 8b. Persona consistency — did the LLM stay in character?
+        drift_score = score_persona_consistency(reasoning, persona)
+        if drift_score < 0.67:
+            print(f"  [{name}] *** PERSONA DRIFT *** consistency score "
+                  f"{drift_score:.2f} (reasoning may contradict agent profile)")
+
         # 9. Log
         pv = persona.portfolio_value(self.market.current_prices)
         log.append({
-            "step":             step,
-            "agent":            name,
-            "decision":         decision,
-            "outcome":          outcome,
-            "hallucination":    result["filtered"],
-            "stale_context":    stale_flag,
-            "cash":             round(persona.scratch.cash_balance, 2),
-            "portfolio_value":  pv,
-            "positions":        {s: dict(p)
-                                 for s, p in persona.scratch.positions.items()},
-            "market_prices":    dict(self.market.current_prices),
+            "step":                step,
+            "agent":               name,
+            "decision":            decision,
+            "outcome":             outcome,
+            "hallucination":       result["filtered"],
+            "stale_context":       stale_flag,
+            "persona_drift_score": drift_score,
+            "compression":         mc_stats,
+            "cash":                round(persona.scratch.cash_balance, 2),
+            "portfolio_value":     pv,
+            "positions":           {s: dict(p)
+                                    for s, p in persona.scratch.positions.items()},
+            "market_prices":       dict(self.market.current_prices),
         })
 
     # -----------------------------------------------------------------------
@@ -481,6 +523,13 @@ class TradingReverie:
                 "active_decisions":      0,  # buy or sell (not hold/analyze)
                 "action_hallucinations": 0,
                 "stale_context_hits":    0,
+                "drift_scores":          [],  # persona_drift_score per step
+                "mc_nodes_in":           0,
+                "mc_nodes_out":          0,
+                "mc_dropped_duplicate":  0,
+                "mc_dropped_stale":      0,
+                "mc_dropped_budget":     0,
+                "mc_annotated_stale":    0,
                 "action_counts":         {"buy": 0, "sell": 0,
                                           "hold": 0, "analyze": 0},
                 "start_portfolio":       0.0,
@@ -514,6 +563,18 @@ class TradingReverie:
             if entry.get("stale_context"):
                 ag["stale_context_hits"] += 1
 
+            drift = entry.get("persona_drift_score")
+            if drift is not None:
+                ag["drift_scores"].append(drift)
+
+            mc = entry.get("compression") or {}
+            ag["mc_nodes_in"]          += mc.get("nodes_in", 0)
+            ag["mc_nodes_out"]         += mc.get("nodes_out", 0)
+            ag["mc_dropped_duplicate"] += mc.get("dropped_duplicate", 0)
+            ag["mc_dropped_stale"]     += mc.get("dropped_stale", 0)
+            ag["mc_dropped_budget"]    += mc.get("dropped_budget", 0)
+            ag["mc_annotated_stale"]   += mc.get("annotated_stale", 0)
+
             # Last seen entry = end state
             ag["end_portfolio"] = entry["portfolio_value"]
 
@@ -528,17 +589,33 @@ class TradingReverie:
             stale_rate     = round(ag["stale_context_hits"]    / total  * 100, 1)
             pnl            = round(ag["end_portfolio"] - ag["start_portfolio"], 2)
 
+            scores = ag["drift_scores"]
+            avg_drift  = round(sum(scores) / len(scores), 2) if scores else None
+            drift_events = sum(1 for s in scores if s < 0.67)
+
             summary[name] = {
-                "total_decisions":          ag["total_decisions"],
-                "active_decisions":         ag["active_decisions"],
-                "action_hallucinations":    ag["action_hallucinations"],
+                "total_decisions":              ag["total_decisions"],
+                "active_decisions":             ag["active_decisions"],
+                "action_hallucinations":        ag["action_hallucinations"],
                 "action_hallucination_rate_pct": action_h_rate,
-                "stale_context_hits":       ag["stale_context_hits"],
-                "stale_context_rate_pct":   stale_rate,
-                "action_distribution":      ag["action_counts"],
-                "start_portfolio_usd":      ag["start_portfolio"],
-                "end_portfolio_usd":        ag["end_portfolio"],
-                "pnl_usd":                  pnl,
+                "stale_context_hits":           ag["stale_context_hits"],
+                "stale_context_rate_pct":       stale_rate,
+                "avg_persona_consistency":      avg_drift,
+                "persona_drift_events":         drift_events,
+                "memory_compression": {
+                    "nodes_in":          ag["mc_nodes_in"],
+                    "nodes_out":         ag["mc_nodes_out"],
+                    "compression_ratio": (round(ag["mc_nodes_out"] / ag["mc_nodes_in"], 3)
+                                          if ag["mc_nodes_in"] else 1.0),
+                    "dropped_duplicate": ag["mc_dropped_duplicate"],
+                    "dropped_stale":     ag["mc_dropped_stale"],
+                    "dropped_budget":    ag["mc_dropped_budget"],
+                    "annotated_stale":   ag["mc_annotated_stale"],
+                },
+                "action_distribution":          ag["action_counts"],
+                "start_portfolio_usd":          ag["start_portfolio"],
+                "end_portfolio_usd":            ag["end_portfolio"],
+                "pnl_usd":                      pnl,
             }
             total_hallucinations += ag["action_hallucinations"]
 
@@ -570,6 +647,18 @@ class TradingReverie:
                   f"({ag['action_hallucination_rate_pct']}% of active)")
             print(f"    Stale context hits    : {ag['stale_context_hits']}  "
                   f"({ag['stale_context_rate_pct']}% of decisions)")
+            avg_c = ag.get("avg_persona_consistency")
+            drift_e = ag.get("persona_drift_events", 0)
+            avg_str = f"{avg_c:.2f}" if avg_c is not None else "n/a"
+            print(f"    Persona consistency   : avg={avg_str}  "
+                  f"drift events={drift_e}")
+            mc = ag.get("memory_compression", {})
+            if mc.get("nodes_in"):
+                print(f"    Memory compression    : {mc['nodes_in']}→{mc['nodes_out']} nodes "
+                      f"(ratio={mc['compression_ratio']})")
+                print(f"      dropped: dup={mc['dropped_duplicate']} "
+                      f"stale={mc['dropped_stale']} budget={mc['dropped_budget']}  "
+                      f"annotated={mc['annotated_stale']}")
             dist = ag["action_distribution"]
             print(f"    Actions        : buy={dist.get('buy',0)}  "
                   f"sell={dist.get('sell',0)}  hold={dist.get('hold',0)}  "
