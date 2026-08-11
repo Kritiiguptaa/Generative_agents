@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% load staticfiles %}
+
+{% block content %}
+
+<style>
+	.scratch_table {
+		font-size: 1.3em;
+	}
+</style>
+
+<h3 style="width:80%; margin:0 auto; margin-top:5em; padding:1em; padding-left:3.5em; padding-right:2em; border-radius:10px; padding-top:3em"><a href="/map/{{sim_code}}/{{step}}/">&lt; Return to trading floor</a></h3>
+
+<div class="media" style="width:80%; margin:0 auto; margin-top:2em; background-color:#EEEEEE; padding:1em; padding-left:3.5em; padding-right:2em; border-radius:10px; padding-top:3em">
+  <div class="media-left media">
+    <a href="#">
+    	{% with 'assets/characters/profile/'|add:persona_name_underscore|add:'.png' as image_static %}
+      <img class="media-object" src="{% static image_static %}" style="width:5em">
+      {% endwith %}
+    </a>
+  </div>
+  <div class="media-body" style='padding-left:3em; padding-top:0.5em; padding-bottom:1em'>
+  	<div class="row">
+    	<h1 class="col-md-8" style="margin-bottom:0.8em; font-size:2em; ">
+    		{{persona_name}}
+    	</h1>
+    	<div class="col-md-4" style="text-align:right; padding-top:0.8em;">
+    		<span style="background:#d9edf7; color:#31708f; padding:0.4em 0.7em; border-radius:8px; font-weight:700;">Step {{step}}</span>
+    	</div>
+    </div>
+
+    <h3 style="font-size:1.65em"><strong>Persona</strong></h3>
+    <table class="scratch_table" style="width:100%">
+      <tr>
+        <td style="width:22%; font-weight:800">Trader type</td>
+        <td>{{snippet.trader_type}} &nbsp;<span style="color:#777">(risk tolerance: {{snippet.risk_tolerance}})</span></td>
+      </tr>
+      <tr>
+        <td style="font-weight:800">Traits</td>
+        <td>{{snippet.innate}}</td>
+      </tr>
+      <tr>
+        <td style="font-weight:800">Background</td>
+        <td>{{snippet.learned}}</td>
+      </tr>
+      <tr>
+        <td style="font-weight:800">Currently</td>
+        <td>{{snippet.currently}}</td>
+      </tr>
+      <tr>
+        <td style="font-weight:800">Trading strategy</td>
+        <td>{{snippet.trading_strategy}}</td>
+      </tr>
+      <tr>
+        <td style="font-weight:800">Watchlist</td>
+        <td>{{snippet.watchlist|join:", "}}</td>
+      </tr>
+    </table>
+
+    <br>
+
+    <h3 style="font-size:1.65em"><strong>Decision at step {{step}}</strong></h3>
+    {% if has_record %}
+    <table class="scratch_table" style="width:100%">
+      <tr>
+        <td style="width:22%; font-weight:800">Status</td>
+        <td>
+          {% if record.status == "success" %}
+            <span style="background:#dff0d8; color:#3c763d; padding:0.2em 0.6em; border-radius:6px;">SUCCESS</span>
+          {% elif record.status == "retry" %}
+            <span style="background:#fcf8e3; color:#8a6d3b; padding:0.2em 0.6em; border-radius:6px;">RETRY</span>
+          {% elif record.status == "fallback" %}
+            <span style="background:#f2dede; color:#a94442; padding:0.2em 0.6em; border-radius:6px;">FALLBACK</span>
+          {% else %}
+            <span style="background:#eeeeee; color:#777777; padding:0.2em 0.6em; border-radius:6px;">{{record.status|upper}}</span>
+          {% endif %}
+          {% if record.error_reason %} &nbsp;<span style="color:#a94442">{{record.error_reason}}</span>{% endif %}
+          {% if record.hallucination %} &nbsp;<span style="color:#a94442">(filtered by action_filtering)</span>{% endif %}
+        </td>
+      </tr>
+      <tr>
+        <td style="font-weight:800">Action</td>
+        <td>{{record.description}}{% if record.outcome %} — {{record.outcome}}{% endif %}</td>
+      </tr>
+      <tr>
+        <td style="font-weight:800">Reasoning</td>
+        <td>{{record.reasoning|default:"<em>none given</em>"}}</td>
+      </tr>
+      {% if record.stale_context %}
+      <tr>
+        <td style="font-weight:800">Stale context flag</td>
+        <td style="color:#a94442">{{record.stale_context}}</td>
+      </tr>
+      {% endif %}
+      {% if record.persona_drift_score != None %}
+      <tr>
+        <td style="font-weight:800">Persona consistency score</td>
+        <td>{{record.persona_drift_score|floatformat:2}}</td>
+      </tr>
+      {% endif %}
+      <tr>
+        <td style="font-weight:800">Portfolio value</td>
+        <td>${{record.portfolio_value|floatformat:0}} &nbsp;(cash ${{record.cash|floatformat:0}})</td>
+      </tr>
+      <tr>
+        <td style="font-weight:800">Positions</td>
+        <td>
+          {% for sym, pos in record.positions.items %}{{sym}} x{{pos.qty}}{% if not forloop.last %}, {% endif %}{% empty %}none{% endfor %}
+        </td>
+      </tr>
+    </table>
+    {% else %}
+    <p><em>No decision record yet for this step (the run may not have reached it, or hasn't started).</em></p>
+    {% endif %}
+
+  </div>
+</div>
+
+<div style="margin-top:6em"></div>
+
+{% endblock content %}

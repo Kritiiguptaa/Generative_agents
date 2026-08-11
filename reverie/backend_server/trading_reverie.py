@@ -112,7 +112,16 @@ def make_trading_decision(persona: TradingPersona,
     memory_context = id_rag_anchor(persona, memory_context)
 
     def _call_llm(prompt: str) -> str:
-        return ollama_request(prompt, max_tokens=120, stop=["\n\n"], timeout=300)
+        # format="json": grammar-constrained decoding. phi3:mini otherwise
+        #   intermittently emits invalid JSON syntax (bare `end="..."` keys,
+        #   // comments, trailing commas) that json.loads() rejects, which
+        #   showed up as "response was not valid JSON" fallbacks.
+        # max_tokens=300: 120 truncated verbose reasoning mid-string
+        #   (done_reason="length"), producing unterminated JSON. Measured
+        #   completions run ~70-135 tokens, so 300 is real headroom.
+        # No stop=["\n\n"]: in JSON mode the object ends when it closes, and a
+        #   blank line inside pretty-printed JSON would cut it off early.
+        return ollama_request(prompt, max_tokens=300, timeout=300, format="json")
 
     decision = run_action_filtering_step(
         persona,
@@ -334,6 +343,14 @@ class TradingReverie:
         log = []
         interactions = []
         sim_path = Path(self.sim_folder)
+        log_path = sim_path / "reverie" / "trading_log.json"
+        interactions_path = sim_path / "reverie" / "trading_interactions.json"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Mark the run live immediately, before the first step even
+        # finishes, so a frontend poll landing right after startup sees
+        # sim_running=True instead of a stale/absent flag.
+        self._write_run_status(self.market.step, running=True)
 
         for _ in range(n_steps):
             step = self.market.step      # capture before tick increments it
@@ -377,6 +394,19 @@ class TradingReverie:
                     print(f"  [{name}] UNHANDLED ERROR: {exc}")
                     traceback.print_exc()
 
+            # ── Live flush ─────────────────────────────────────────────────
+            # Write what we have after every step, not just at the end, so a
+            # frontend poll mid-run sees this step's decisions immediately --
+            # this is what makes the map view live instead of replay-only.
+            with open(log_path, "w", encoding="utf-8") as f:
+                json.dump(log, f, indent=2)
+            # Interactions too -- the map renders these as the two agents
+            # meeting in the aisle, so they have to land live alongside the
+            # decisions rather than only at end-of-run.
+            with open(interactions_path, "w", encoding="utf-8") as f:
+                json.dump(interactions, f, indent=2)
+            self._write_run_status(step, running=True)
+
             # ── Checkpoint ─────────────────────────────────────────────────
             if self.market.step % 100 == 0:
                 self._save()
@@ -384,12 +414,9 @@ class TradingReverie:
 
         # Final save + log
         self._save()
-        log_path = sim_path / "reverie" / "trading_log.json"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "w", encoding="utf-8") as f:
             json.dump(log, f, indent=2)
 
-        interactions_path = sim_path / "reverie" / "trading_interactions.json"
         with open(interactions_path, "w", encoding="utf-8") as f:
             json.dump(interactions, f, indent=2)
 
@@ -398,6 +425,10 @@ class TradingReverie:
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2)
         self._print_report(report)
+
+        # Run is done -- flip the live flag off so frontend pollers stop.
+        last_step = log[-1]["step"] if log else self.market.step
+        self._write_run_status(last_step, running=False)
         return log
 
     # -----------------------------------------------------------------------
@@ -675,6 +706,23 @@ class TradingReverie:
             save_folder = f"{self.sim_folder}/personas/{name}/bootstrap_memory"
             persona.save(save_folder)
         print(f"  [Saved] market step {self.market.step}")
+
+    # -----------------------------------------------------------------------
+
+    def _write_run_status(self, step: int, running: bool):
+        """
+        Read-modify-write meta.json's step/sim_running fields. This is the
+        signal translator/sim_data.py + the map view's live poller use to
+        decide whether to keep polling for new steps or treat the run as a
+        finished replay -- written every step, so keep it cheap.
+        """
+        meta_path = Path(self.sim_folder) / "reverie" / "meta.json"
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        meta["step"] = step
+        meta["sim_running"] = running
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
 
 
 # ===========================================================================

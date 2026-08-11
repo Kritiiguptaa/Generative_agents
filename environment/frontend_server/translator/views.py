@@ -16,6 +16,7 @@ from global_methods import *
 
 from django.contrib.staticfiles.templatetags.staticfiles import static
 from .models import *
+from . import sim_data
 
 
 def _get_latest_live_state_file(sim_code, persona_name, step):
@@ -285,6 +286,117 @@ def replay_persona_state(request, sim_code, step, persona_name):
              "a_mem_thought": a_mem_thought,
              "is_live": is_live}
   template = "persona_state/persona_state.html"
+  return render(request, template, context)
+
+
+def trading_map(request, sim_code, step=0):
+  """
+  Trading-floor map view. No bulk preload any more -- the template fetches
+  step data live from trading_poll() on an interval instead of this view
+  baking the whole run into the page. Works the same whether trading_reverie.py
+  is still actively appending steps to this sim_code or already finished --
+  a finished run's first poll just returns everything at once.
+  """
+  step = int(step)
+  replay = sim_data.build_replay(sim_code)
+
+  persona_names = []
+  for p in replay["persona_names"]:
+    underscore = p.replace(" ", "_")
+    initial = p[0] + p.split(" ")[-1][0]
+    persona_names += [{"original": p, "underscore": underscore, "initial": initial}]
+
+  persona_init_pos = {
+    p.replace(" ", "_"): replay["desk_positions"].get(p, [0, 0])
+    for p in replay["persona_names"]
+  }
+
+  meta = replay["meta"]
+  sec_per_step = meta.get("sec_per_step", 60)
+  start_date = meta.get("start_date")
+  if start_date:
+    start_datetime = datetime.datetime.strptime(
+      start_date + " 09:30:00", '%B %d, %Y %H:%M:%S')
+  else:
+    start_datetime = datetime.datetime.now()
+  start_datetime = start_datetime.strftime("%Y-%m-%dT%H:%M:%S")
+
+  persona_snippets = {
+    p.replace(" ", "_"): snippet
+    for p, snippet in replay["persona_snippets"].items()
+  }
+
+  context = {
+    "sim_code": sim_code,
+    "step": step,
+    "persona_names": persona_names,
+    "persona_init_pos": json.dumps(persona_init_pos),
+    "persona_snippets": json.dumps(persona_snippets),
+    "start_datetime": start_datetime,
+    "sec_per_step": sec_per_step,
+    "is_running": replay["is_running"],
+    "has_data": bool(replay["steps"]),
+    # Map geometry comes from sim_data so the tile constants live in exactly
+    # one place -- the frontend never hardcodes its own copy.
+    "market_board_tile": json.dumps(sim_data.MARKET_BOARD_TILE),
+  }
+  template = "trading_map/trading_map.html"
+  return render(request, template, context)
+
+
+def trading_poll(request, sim_code):
+  """
+  <BACKEND to FRONTEND, live mode>
+  Polling counterpart to trading_map()'s one-time render. Reads through the
+  same sim_data.build_replay() ingestion layer -- no duplicated parsing --
+  and hands back everything accumulated so far plus whether trading_reverie.py
+  is still actively writing new steps (meta.json's sim_running flag). The
+  frontend calls this on an interval so a run in progress becomes visible
+  step-by-step as it actually happens, instead of only after it finishes.
+  """
+  replay = sim_data.build_replay(sim_code)
+  return JsonResponse({
+    "current_step": max(replay["steps"]) if replay["steps"] else -1,
+    "is_running": replay["is_running"],
+    "movement": replay["movement"],
+    "market_prices_by_step": replay["market_prices_by_step"],
+    "interactions_by_step": replay["interactions_by_step"],
+  })
+
+
+def trading_persona_state(request, sim_code, step, persona_name):
+  """
+  Per-agent detail panel for the trading map. Like replay_persona_state, but
+  sourced from sim_data.py so it carries the requested step's decision,
+  reasoning, and retry/fallback status alongside the static persona snippet
+  from scratch.json -- not just the static snapshot.
+  """
+  step = int(step)
+  persona_name_underscore = persona_name
+  persona_name = " ".join(persona_name.split("_"))
+
+  replay = sim_data.build_replay(sim_code)
+  snippet = replay["persona_snippets"].get(persona_name, {})
+  step_record = replay["movement"].get(step, {}).get(persona_name)
+
+  # Fall back to the nearest earlier step that has a record for this persona,
+  # since a given step may not have one for every agent.
+  if step_record is None:
+    for s in sorted(replay["movement"].keys(), reverse=True):
+      if s <= step and persona_name in replay["movement"][s]:
+        step_record = replay["movement"][s][persona_name]
+        break
+
+  context = {
+    "sim_code": sim_code,
+    "step": step,
+    "persona_name": persona_name,
+    "persona_name_underscore": persona_name_underscore,
+    "snippet": snippet,
+    "record": step_record,
+    "has_record": step_record is not None,
+  }
+  template = "persona_state/trading_persona_state.html"
   return render(request, template, context)
 
 

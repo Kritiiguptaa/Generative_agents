@@ -46,20 +46,26 @@ def temp_sleep(seconds=0.1):
 #       "num_thread": 2   # Minimal CPU threads - let GPU handle it
 #     }
 #   }
-def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=60, max_tokens=None, stop=None):
+# Default timeout raised from 60s after measuring real call durations on this
+# setup (phi3:mini, local Ollama): of 61 successful calls in one run, median
+# 85s, max 361s, and 36 of them exceeded 60s. The old default meant the
+# reflect/poignancy call sites below (which pass no timeout) failed more often
+# than they succeeded, burning a full 60s each time before returning the
+# "OLLAMA ERROR" sentinel and retrying.
+def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=300, max_tokens=None, stop=None, format=None):
   if model is None:
     model = OLLAMA_CHAT_MODEL
-  
+
   import time
   start_time = time.time()
   print(f"[SENDING] OLLAMA: Sending request to model '{model}'...")
-  
+
   options = {
     "temperature": temperature,
     "num_gpu": 999,
     "num_thread": 2
   }
-  
+
   # Tell Ollama when to stop talking!
   if max_tokens:
     options["num_predict"] = max_tokens
@@ -72,24 +78,40 @@ def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=60, 
     "stream": stream,
     "options": options
   }
+  # format="json" puts Ollama in grammar-constrained decoding, which makes
+  # syntactically invalid JSON structurally impossible. Small models like
+  # phi3:mini otherwise emit things like `end="..."` instead of a quoted key,
+  # // comments, and trailing commas -- all confirmed observed here, and all
+  # of which json.loads() rejects outright.
+  if format:
+    payload["format"] = format
   try:
     resp = requests.post(OLLAMA_GENERATE_URL, json=payload, timeout=timeout)
     resp.raise_for_status()
-    
+
     # Try to parse as JSON first
     try:
       data = resp.json()
       response = data.get("response") or data.get("text")
     except json.JSONDecodeError:
       # If JSON parsing fails, treat the entire response as plain text
+      data = {}
       response = resp.text.strip()
-    
+
     if not response:
       raise ValueError(f"Empty OLLAMA response")
-    
+
+    # done_reason == "length" means num_predict cut the model off mid-sentence.
+    # Silently returning that truncated text is how a too-small max_tokens
+    # masquerades as "the model produced invalid JSON" -- surface it instead.
+    if data.get("done_reason") == "length":
+      print(f"[WARN] OLLAMA: output TRUNCATED at num_predict="
+            f"{options.get('num_predict')} tokens -- response is incomplete. "
+            f"Raise max_tokens if downstream parsing fails.")
+
     elapsed = time.time() - start_time
     print(f"[OK] OLLAMA: Response received in {elapsed:.1f}s\n")
-    return response.strip() if response else ""  
+    return response.strip() if response else ""
   except requests.exceptions.ConnectionError as e:
     print(f"\n[ERROR] OLLAMA ERROR: Cannot connect to OLLAMA server")
     print(f"   Server URL: {OLLAMA_BASE_URL}")

@@ -1,0 +1,491 @@
+{% load staticfiles %}
+<script type="text/javascript">
+	/*
+	  Trading-floor Phaser engine. Adapted from templates/demo/main_script.html.
+	  trading_reverie.py never rewrites environment/{step}.json, so there's no
+	  raw per-step (x,y) from the backend -- but translator/sim_data.py derives
+	  a real one from the actual decision: BUY/SELL sends an agent to the
+	  MARKET_BOARD_TILE for that step, HOLD keeps them at their desk. That's
+	  what's walked here, pixel by pixel, same interpolation style the
+	  original engine uses.
+
+	  LIVE MODE: unlike demo()'s bulk preload, this page starts with an empty
+	  all_movement and fetches from trading_poll()/ on an interval (see
+	  poll_for_updates() below) -- the same AJAX-polling shape home/main_script.html
+	  uses for a truly live sim, adapted to read through sim_data.py instead of
+	  the raw movement/{step}.json files home mode reads. While trading_reverie.py
+	  is still writing new steps (meta.json's sim_running flag), each poll picks
+	  up whatever's new and the walk animation advances into it automatically;
+	  once the backend finishes, one more poll confirms sim_running=false and
+	  polling stops -- everything already on screen just keeps working as a
+	  normal finished replay.
+	*/
+
+	let sim_code = "{{ sim_code }}";
+	let step = {{ step }};
+	let max_step = 0;
+	let sec_per_step = {{ sec_per_step }};
+	let persona_init_pos = {{ persona_init_pos|safe }};
+	let all_movement = {};
+	let market_prices_by_step = {};
+	let interactions_by_step = {};
+	let is_running = {{ is_running|yesno:"true,false" }};
+	let market_board_tile = {{ market_board_tile|safe }};
+	let start_datetime = new Date(Date.parse("{{ start_datetime }}"));
+
+	const STATUS_COLORS = {success: "#3c763d", retry: "#8a6d3b", fallback: "#a94442", hallucination: "#a94442", unknown: "#777777"};
+	const STATUS_BG = {success: "#dff0d8", retry: "#fcf8e3", fallback: "#f2dede", hallucination: "#f2dede", unknown: "#eeeeee"};
+	const POLL_INTERVAL_MS = 4000;
+
+	const config = {
+	  type: Phaser.AUTO,
+	  width: 900,
+	  height: 560,
+	  parent: "game-container",
+	  pixelArt: true,
+	  physics: {default: "arcade", arcade: {gravity: {y: 0}}},
+	  scene: {preload: preload, create: create, update: update}
+	  // No scale.zoom -- the office map is 44x32 @16px (704x512), which fits
+	  // the canvas at native resolution. Camera zoom is set in create().
+	};
+	const game = new Phaser.Game(config);
+
+	let personas = {};
+	let pronunciatios = {};
+	let speech_bubbles = {};
+	let chat_texts = {};
+	let movement_target = {};   // per-agent goal tile [tx, ty]
+	let movement_path = {};     // per-agent remaining waypoints, in tiles
+	let current_tile = {};      // per-agent logical tile (authoritative for pathing)
+	let last_facing = {};
+	let walkable = null;        // [y][x] bool, built from the map's Collisions layer
+	let map_w = 0, map_h = 0;
+	const tile_width = 16;      // office.json is a 16px-tile map
+	const movement_speed = 2;   // px/frame
+
+	function preload() {
+	  this.load.crossOrigin = '';
+
+	  // Office tileset pack (office-main). Keys here are bound to the tileset
+	  // NAMES inside office.json via map.addTilesetImage(name, key) in create().
+	  this.load.image("room_builder", "{% static 'assets/office/visuals/tilesets/Room_Builder_Office_16x16.png' %}");
+	  this.load.image("modern_office", "{% static 'assets/office/visuals/tilesets/Modern_Office_16x16.png' %}");
+	  this.load.image("blocks", "{% static 'assets/office/visuals/tilesets/blocks.png' %}");
+
+	  this.load.tilemapTiledJSON("map", "{% static 'assets/office/visuals/office.json' %}");
+
+	  {% for p in persona_names %}
+		  {% with 'assets/characters/'|add:p.underscore|add:'.png' as image_static %}
+			  this.load.atlas("{{p.underscore}}", "{% static image_static %}",
+			  										  		     "{% static 'assets/characters/atlas.json' %}");
+			{% endwith %}
+	  {% endfor %}
+
+	  this.load.image('speech_bubble', "{% static 'assets/speech_bubble/v3.png' %}");
+	}
+
+	function create() {
+	  const map = this.make.tilemap({ key: "map" });
+
+	  // Tileset names must match office.json's "tilesets"[].name exactly.
+	  const room_builder = map.addTilesetImage("room_builder", "room_builder");
+	  const modern_office = map.addTilesetImage("modern_office", "modern_office");
+	  const blocks = map.addTilesetImage("blocks", "blocks");
+	  const all_tilesets = [room_builder, modern_office, blocks];
+
+	  map.createLayer("Floor", all_tilesets, 0, 0);
+	  map.createLayer("Walls", all_tilesets, 0, 0);
+	  map.createLayer("Furniture L1", all_tilesets, 0, 0);
+	  map.createLayer("Furniture L2", all_tilesets, 0, 0);
+	  const foregroundL1Layer = map.createLayer("Foreground L1", all_tilesets, 0, 0);
+	  foregroundL1Layer.setDepth(2);
+	  // The blocks layers (Collisions, Arena/Sector/World/Spawning) are
+	  // authoring metadata, not scenery -- never rendered. Collisions is read
+	  // below purely as the walkability source for pathfinding.
+
+	  // Walkability grid straight from the map's own Collisions layer, so
+	  // pathfinding agrees with the map by construction rather than by a
+	  // hand-maintained copy. A non-empty tile there means blocked.
+	  map_w = map.width;
+	  map_h = map.height;
+	  const coll = map.getLayer("Collisions").data;
+	  walkable = [];
+	  for (let y = 0; y < map_h; y++) {
+	    const row = [];
+	    for (let x = 0; x < map_w; x++) {
+	      const idx = coll[y][x].index;
+	      row.push(idx === -1 || idx === 0);
+	    }
+	    walkable.push(row);
+	  }
+
+	  // Whole office fits the canvas at native res -- show all of it rather
+	  // than following one agent, since the point is watching all three move.
+	  const camera = this.cameras.main;
+	  camera.setZoom(1);
+	  camera.centerOn(map.widthInPixels / 2, map.heightInPixels / 2);
+
+	  // Label the presentation-screen bank agents walk to on a real BUY/SELL
+	  // (game object 32147 in the map's matrix; see sim_data.MARKET_BOARD_TILE).
+	  const board_px = tile_to_px(market_board_tile[0], market_board_tile[1]);
+	  this.add.text(board_px[0], board_px[1] - 34, "📈 MARKET BOARD", {
+	    font: "8px monospace", fill: "#ffffff", backgroundColor: "#111111",
+	    padding: {x: 3, y: 2}
+	  }).setOrigin(0.5, 0).setDepth(4);
+
+	  const anims = this.anims;
+	  for (const key in persona_init_pos) {
+	    // Starting tile: wherever this agent's real record says they are at
+	    // the initial step (desk or market board). Nothing has been polled
+	    // yet at this point, so this falls back to the desk position until
+	    // the first poll response lands -- not a fake walk-in.
+	    const initial_rec = get_record(step, key);
+	    const pos = initial_rec ? initial_rec.movement : persona_init_pos[key];
+	    const start_px = tile_to_px(pos[0], pos[1]);
+	    const start_x = start_px[0], start_y = start_px[1];
+
+	    const sprite = this.add.sprite(start_x, start_y, key, "down");
+	    sprite.displayWidth = 22;   // sized for this map's 16px tiles
+	    sprite.scaleY = sprite.scaleX;
+	    sprite.setDepth(1);
+	    personas[key] = sprite;
+	    current_tile[key] = [pos[0], pos[1]];
+	    movement_target[key] = [pos[0], pos[1]];
+	    movement_path[key] = [];
+	    last_facing[key] = "down";
+
+	    speech_bubbles[key] = this.add.image(start_x, start_y - 30, 'speech_bubble').setDepth(3);
+	    speech_bubbles[key].displayWidth = 130;
+	    speech_bubbles[key].displayHeight = 58;
+
+	    pronunciatios[key] = this.add.text(start_x - 6, start_y - 46, "✉", {
+	      font: "20px monospace", fill: "#000000", padding: {x: 6, y: 6}
+	    }).setDepth(3);
+
+	    // Real peer-conversation text (trading_interactions.py's LLM-generated
+	    // summary). Hidden unless this agent is actually in an interaction on
+	    // the current step -- see render_step().
+	    chat_texts[key] = this.add.text(start_x, start_y - 62, "", {
+	      font: "7px monospace", fill: "#ffffff", backgroundColor: "#222222",
+	      padding: {x: 3, y: 2}, align: "center",
+	      wordWrap: {width: 150, useAdvancedWrap: true}
+	    }).setOrigin(0.5, 1).setDepth(5);
+	    chat_texts[key].visible = false;
+
+	    // Walk-cycle anims, same atlas frame names demo/main_script.html uses
+	    // (left-walk.000..003, etc, defined once for all personas in
+	    // characters/atlas.json).
+	    anims.create({key: key + "-left-walk", frames: anims.generateFrameNames(key, {prefix: "left-walk.", start: 0, end: 3, zeroPad: 3}), frameRate: 8, repeat: -1});
+	    anims.create({key: key + "-right-walk", frames: anims.generateFrameNames(key, {prefix: "right-walk.", start: 0, end: 3, zeroPad: 3}), frameRate: 8, repeat: -1});
+	    anims.create({key: key + "-down-walk", frames: anims.generateFrameNames(key, {prefix: "down-walk.", start: 0, end: 3, zeroPad: 3}), frameRate: 8, repeat: -1});
+	    anims.create({key: key + "-up-walk", frames: anims.generateFrameNames(key, {prefix: "up-walk.", start: 0, end: 3, zeroPad: 3}), frameRate: 8, repeat: -1});
+	  }
+
+	  render_step(step);
+	  // No preloaded data to auto-play yet -- poll_for_updates() (kicked off
+	  // on DOMContentLoaded, below) calls play_replay() itself the moment the
+	  // first real step arrives.
+	}
+
+	// ###########################################################################
+	// PATHFINDING -- the office has real furniture, so agents walk around it
+	// rather than through it. Breadth-first search over the map's own
+	// Collisions layer gives the shortest 4-directional route; update() then
+	// walks the returned waypoints one tile at a time.
+	// ###########################################################################
+
+	function tile_to_px(tx, ty) {
+	  // x centred in the tile, y at its bottom edge (the sprite's feet).
+	  return [tx * tile_width + tile_width / 2, ty * tile_width + tile_width];
+	}
+
+	function is_walkable(x, y) {
+	  return x >= 0 && y >= 0 && x < map_w && y < map_h && walkable && walkable[y][x];
+	}
+
+	function find_path(start, goal) {
+	  if (start[0] === goal[0] && start[1] === goal[1]) return [];
+	  if (!is_walkable(goal[0], goal[1])) return [];
+
+	  const key_of = (x, y) => y * map_w + x;
+	  const came_from = new Map();
+	  const seen = new Set([key_of(start[0], start[1])]);
+	  let frontier = [start];
+
+	  while (frontier.length) {
+	    const next_frontier = [];
+	    for (const [cx, cy] of frontier) {
+	      if (cx === goal[0] && cy === goal[1]) {
+	        // Walk the parent chain back to the start.
+	        const path = [];
+	        let cur = key_of(cx, cy);
+	        while (cur !== key_of(start[0], start[1])) {
+	          path.push([cur % map_w, Math.floor(cur / map_w)]);
+	          cur = came_from.get(cur);
+	        }
+	        return path.reverse();
+	      }
+	      const neighbours = [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]];
+	      for (const [nx, ny] of neighbours) {
+	        const nk = key_of(nx, ny);
+	        if (seen.has(nk) || !is_walkable(nx, ny)) continue;
+	        seen.add(nk);
+	        came_from.set(nk, key_of(cx, cy));
+	        next_frontier.push([nx, ny]);
+	      }
+	    }
+	    frontier = next_frontier;
+	  }
+	  return [];   // unreachable -- agent simply stays put rather than teleporting
+	}
+
+	function set_target(key, tile) {
+	  const cur_target = movement_target[key];
+	  if (cur_target && cur_target[0] === tile[0] && cur_target[1] === tile[1]) return;
+	  movement_target[key] = [tile[0], tile[1]];
+	  movement_path[key] = find_path(current_tile[key], tile);
+	}
+
+	function update() {
+	  for (const key in personas) {
+	    const sprite = personas[key];
+	    const path = movement_path[key];
+	    let dir = null;
+
+	    if (path && path.length) {
+	      const [wx, wy] = path[0];
+	      const [tx, ty] = tile_to_px(wx, wy);
+
+	      if (sprite.x < tx) { sprite.x = Math.min(sprite.x + movement_speed, tx); dir = "right"; }
+	      else if (sprite.x > tx) { sprite.x = Math.max(sprite.x - movement_speed, tx); dir = "left"; }
+	      else if (sprite.y < ty) { sprite.y = Math.min(sprite.y + movement_speed, ty); dir = "down"; }
+	      else if (sprite.y > ty) { sprite.y = Math.max(sprite.y - movement_speed, ty); dir = "up"; }
+
+	      if (sprite.x === tx && sprite.y === ty) {
+	        current_tile[key] = [wx, wy];
+	        path.shift();
+	      }
+	    }
+
+	    if (dir) {
+	      sprite.anims.play(key + "-" + dir + "-walk", true);
+	      last_facing[key] = dir;
+	    } else if (sprite.anims.isPlaying) {
+	      sprite.anims.stop();
+	      sprite.setTexture(key, last_facing[key]);
+	    }
+
+	    pronunciatios[key].x = sprite.x - 6;
+	    pronunciatios[key].y = sprite.y - 30;
+	    speech_bubbles[key].x = sprite.x;
+	    speech_bubbles[key].y = sprite.y - 20;
+	    chat_texts[key].x = sprite.x;
+	    chat_texts[key].y = sprite.y - 34;
+	  }
+	}
+
+	// ###########################################################################
+	// SCRUBBER -- render_step() sets each agent's target tile + refreshes the
+	// text/badge panels; update() (above) walks sprites toward that target
+	// pixel-by-pixel every frame, independent of how often render_step() fires.
+	// ###########################################################################
+
+	function get_record(target_step, underscore_key) {
+	  const full_name = underscore_key.replace(/_/g, " ");
+	  for (let s = target_step; s >= 0; s--) {
+	    const bucket = all_movement[s];
+	    if (bucket && full_name in bucket) return bucket[full_name];
+	  }
+	  return null;
+	}
+
+	function render_step(s) {
+	  step = Math.max(0, Math.min(max_step, s));
+	  document.getElementById("step-content").innerHTML = step;
+	  document.getElementById("step_slider").value = step;
+
+	  const dt = new Date(start_datetime.getTime() + step * sec_per_step * 1000);
+	  document.getElementById("game-time-content").innerHTML = dt.toLocaleString(
+	    "en-US", {weekday: 'short', hour: '2-digit', minute: '2-digit'});
+
+	  const prices = market_prices_by_step[step] || {};
+	  const price_parts = [];
+	  for (const sym in prices) price_parts.push(sym + ": $" + Number(prices[sym]).toFixed(2));
+	  document.getElementById("market_ticker").innerHTML =
+	    price_parts.length ? price_parts.join(" &nbsp;|&nbsp; ") : "no market data for this step";
+
+	  // Real peer interaction banner -- trading_interactions.py fires one every
+	  // 12 steps and has the LLM generate an actual exchange between two agents.
+	  const interaction = interactions_by_step[step];
+	  const banner = document.getElementById("interaction_banner");
+	  if (banner) {
+	    if (interaction) {
+	      banner.style.display = "block";
+	      banner.innerHTML =
+	        "<strong>&#128172; " + (interaction.agents || []).join(" &amp; ") + "</strong> &mdash; " +
+	        "<em>" + (interaction.topic || "") + "</em><br>" +
+	        (interaction.summary || "") +
+	        (interaction.follow_up ? "<br><small><strong>Follow-up:</strong> " + interaction.follow_up + "</small>" : "");
+	    } else {
+	      banner.style.display = "none";
+	    }
+	  }
+
+	  for (const key in personas) {
+	    const rec = get_record(step, key);
+
+	    if (rec && rec.movement) {
+	      set_target(key, rec.movement);
+	    }
+
+	    const icon = rec ? rec.pronunciatio : "…";
+	    if (pronunciatios[key]) pronunciatios[key].setText(icon);
+
+	    // Show the actual conversation text over an agent's head only on the
+	    // steps they're really in an interaction.
+	    if (chat_texts[key]) {
+	      if (rec && rec.chat) {
+	        chat_texts[key].setText(rec.chat);
+	        chat_texts[key].visible = true;
+	      } else {
+	        chat_texts[key].visible = false;
+	      }
+	    }
+	    const quick_emoji_el = document.getElementById("quick_emoji-" + key);
+	    if (quick_emoji_el) quick_emoji_el.innerHTML = icon;
+
+	    const action_el = document.getElementById("current_action__" + key);
+	    const reasoning_el = document.getElementById("reasoning__" + key);
+	    const badge_el = document.getElementById("status_badge__" + key);
+	    const pv_el = document.getElementById("portfolio_value__" + key);
+	    const cash_el = document.getElementById("cash__" + key);
+	    const pos_el = document.getElementById("positions__" + key);
+
+	    if (rec) {
+	      action_el.innerHTML = rec.description + (rec.outcome ? " — " + rec.outcome : "");
+	      reasoning_el.innerHTML = rec.reasoning || "<em>none given</em>";
+	      pv_el.innerHTML = rec.portfolio_value != null
+	        ? Number(rec.portfolio_value).toLocaleString(undefined, {maximumFractionDigits: 0}) : "—";
+	      cash_el.innerHTML = rec.cash != null
+	        ? Number(rec.cash).toLocaleString(undefined, {maximumFractionDigits: 0}) : "—";
+
+	      const pos_parts = [];
+	      for (const sym in (rec.positions || {})) pos_parts.push(sym + " x" + rec.positions[sym].qty);
+	      pos_el.innerHTML = pos_parts.length ? pos_parts.join(", ") : "none";
+
+	      const status = rec.status || "unknown";
+	      let label = status.toUpperCase();
+	      if (rec.error_reason) label += " — " + rec.error_reason;
+	      if (rec.hallucination) label += " (filtered by action_filtering)";
+	      badge_el.innerHTML = label;
+	      badge_el.style.color = STATUS_COLORS[status] || "#777777";
+	      badge_el.style.background = STATUS_BG[status] || "#eeeeee";
+	      badge_el.style.padding = "2px 8px";
+	      badge_el.style.borderRadius = "6px";
+	    } else {
+	      action_el.innerHTML = "<em>no data yet for this step</em>";
+	      reasoning_el.innerHTML = "";
+	      badge_el.innerHTML = "";
+	      pv_el.innerHTML = "—";
+	      cash_el.innerHTML = "—";
+	      pos_el.innerHTML = "—";
+	    }
+
+	    const link_el = document.getElementById("state_details_link-" + key);
+	    if (link_el) {
+	      link_el.setAttribute("href", "/trading_persona_state/" + sim_code + "/" + step + "/" + key + "/");
+	    }
+	  }
+	}
+
+	function focus_persona(key) {
+	  document.getElementById("on_screen_det_content-init").style.display = "none";
+	  for (const p_key in persona_init_pos) {
+	    document.getElementById("on_screen_det_content-" + p_key).style.display = "none";
+	    document.getElementById("on_screen_det_trigger_container-" + p_key).style.background = "";
+	  }
+	  document.getElementById("on_screen_det_content-" + key).style.display = "block";
+	  document.getElementById("on_screen_det_trigger_container-" + key).style.background = "#ABFF84";
+	}
+
+	// ###########################################################################
+	// LIVE POLLING -- replaces the old bulk all_movement preload. Every
+	// POLL_INTERVAL_MS, ask trading_poll() for whatever trading_reverie.py has
+	// produced so far. As long as new steps keep showing up, play_replay()'s
+	// timer keeps walking sprites into them one at a time; once a poll comes
+	// back with sim_running=false and there's nothing left to catch up on,
+	// polling stops on its own.
+	// ###########################################################################
+
+	function update_live_badge() {
+	  const el = document.getElementById("live_badge");
+	  if (!el) return;
+	  if (is_running) {
+	    el.innerHTML = "&#9679; LIVE";
+	    el.style.color = "#a94442";
+	  } else {
+	    el.innerHTML = "FINISHED";
+	    el.style.color = "#777777";
+	  }
+	}
+
+	function poll_for_updates() {
+	  fetch("/trading_poll/" + sim_code + "/")
+	    .then(function (resp) { return resp.json(); })
+	    .then(function (data) {
+	      is_running = data.is_running;
+	      market_prices_by_step = data.market_prices_by_step || {};
+	      interactions_by_step = data.interactions_by_step || {};
+	      for (const s in (data.movement || {})) {
+	        all_movement[s] = data.movement[s];
+	      }
+	      const seen_steps = Object.keys(all_movement).map(Number);
+	      max_step = seen_steps.length ? Math.max.apply(null, seen_steps) : 0;
+
+	      document.getElementById("step_slider").max = max_step;
+	      const max_step_el = document.getElementById("max-step-content");
+	      if (max_step_el) max_step_el.innerHTML = max_step;
+	      update_live_badge();
+
+	      if (max_step > 0) play_replay();
+	    })
+	    .catch(function (err) { console.error("trading_poll failed:", err); })
+	    .finally(function () {
+	      if (is_running) {
+	        setTimeout(poll_for_updates, POLL_INTERVAL_MS);
+	      }
+	    });
+	}
+
+	let play_interval = null;
+	function play_replay() {
+	  if (play_interval) return;
+	  play_interval = setInterval(function () {
+	    if (step >= max_step) {
+	      // Caught up to everything downloaded so far. If the backend is
+	      // done producing steps, stop; otherwise just wait -- the next
+	      // poll_for_updates() tick will raise max_step and this same
+	      // interval picks the walk back up automatically.
+	      if (!is_running) pause_replay();
+	      return;
+	    }
+	    render_step(step + 1);
+	  }, 1600);
+	}
+	function pause_replay() {
+	  if (play_interval) { clearInterval(play_interval); play_interval = null; }
+	}
+
+	document.addEventListener("DOMContentLoaded", function () {
+	  document.getElementById("play_button").onclick = play_replay;
+	  document.getElementById("pause_button").onclick = pause_replay;
+	  document.getElementById("prev_button").onclick = function () { pause_replay(); render_step(step - 1); };
+	  document.getElementById("next_button").onclick = function () { pause_replay(); render_step(step + 1); };
+	  document.getElementById("step_slider").oninput = function (e) {
+	    pause_replay();
+	    render_step(parseInt(e.target.value, 10));
+	  };
+	  update_live_badge();
+	  poll_for_updates();
+	});
+</script>

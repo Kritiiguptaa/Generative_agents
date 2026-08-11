@@ -151,14 +151,60 @@ Respond ONLY in this JSON format:
 	return prompt, legal_actions
 
 
+def _strip_json_wrapper(response_text: str) -> str:
+	"""
+	Local instruct models (e.g. phi3:mini via Ollama) routinely wrap JSON
+	answers in a markdown code fence -- ```json\n{...}\n``` -- or prefix them
+	with a line of chatty preamble. json.loads() rejects both verbatim, which
+	was previously flagging every syntactically-fine response as "not valid
+	JSON" and forcing a fallback HOLD. Strip the fence if present, then fall
+	back to slicing out the first {...} block.
+	"""
+	text = response_text.strip()
+	if text.startswith("```"):
+		text = text[3:]
+		if text.lower().startswith("json"):
+			text = text[4:]
+		fence_end = text.rfind("```")
+		if fence_end != -1:
+			text = text[:fence_end]
+		text = text.strip()
+
+	start = text.find("{")
+	end = text.rfind("}")
+	if start != -1 and end != -1 and end > start:
+		text = text[start:end + 1]
+
+	return text
+
+
 def _parse_json_response(response_text: str) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
 	try:
-		response = json.loads(response_text)
+		response = json.loads(_strip_json_wrapper(response_text))
 	except json.JSONDecodeError:
 		return None, "response was not valid JSON"
 	if not isinstance(response, dict):
 		return None, "response JSON was not an object"
 	return response, None
+
+
+def _split_combined_action(action_raw: object) -> Tuple[Optional[str], Optional[str]]:
+	"""
+	Local instruct models (e.g. phi3:mini) routinely fold the symbol into the
+	action field -- {"action": "BUY NVDA", "symbol": "NVDA", ...} -- even
+	though the rest of the JSON is well-formed. That's a small model's
+	formatting quirk, not a hallucinated/illegal trade -- rejecting the whole
+	response over it would just be parser pickiness inflating the fallback
+	rate without reflecting anything about actual decision quality. Split the
+	leading action word off and hand back whatever trailed it as a fallback
+	symbol hint, in case the "symbol" key itself is missing/null.
+	"""
+	if not isinstance(action_raw, str):
+		return None, None
+	parts = action_raw.strip().upper().split()
+	if not parts:
+		return None, None
+	return parts[0], (parts[1] if len(parts) > 1 else None)
 
 
 def validate_response(
@@ -169,12 +215,21 @@ def validate_response(
 		return None, error
 
 	action_raw = response.get("action")
-	action_type = action_raw.strip().upper() if isinstance(action_raw, str) else None
+	action_type, action_symbol_hint = _split_combined_action(action_raw)
 	symbol = response.get("symbol")
 	if symbol is None:
 		symbol = response.get("ticker")
+	if symbol is None:
+		symbol = action_symbol_hint
 	if isinstance(symbol, str):
 		symbol = symbol.strip().upper()
+		# phi3:mini frequently emits the *string* "null"/"none" rather than a
+		# JSON null for "no symbol". Left as a string it stays truthy, and
+		# execute_trading_action() then treats a plain HOLD as a trade in an
+		# unknown ticker and flags it as a hallucination -- inflating the
+		# headline hallucination rate with decisions that were entirely valid.
+		if symbol in ("NULL", "NONE", ""):
+			symbol = None
 	quantity = response.get("quantity")
 
 	if action_type not in {"BUY", "SELL", "HOLD"}:
@@ -187,6 +242,13 @@ def validate_response(
 			return None, "HOLD was not in legal list"
 		if quantity not in (0, None):
 			return None, "HOLD quantity must be 0"
+		# Normalise exactly like the buy/sell path below does. Without this the
+		# action stays whatever case the model produced ("HOLD"), and
+		# execute_trading_action()'s `action in ("hold", "analyze")` check
+		# misses it, sending a plain hold down the trade-execution path.
+		response["action"] = "hold"
+		response["symbol"] = symbol
+		response["quantity"] = 0
 		return response, None
 
 	if (action_type, symbol) not in legal_map:

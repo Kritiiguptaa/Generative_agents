@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% load staticfiles %}
+
+{% block content %}
+<br>
+<br>
+<div>
+
+	<div style="width:70%; margin:0 auto; text-align:center;">
+		<h2>Agent Anchor — Trading Floor</h2>
+		<h3 style="margin-bottom:1.5em; font-size:1.2em"><em>Replay of <strong>{{ sim_code }}</strong>. Reasoning and status shown are exactly what the model produced and what action_filtering.py did with it -- including retries and fallback HOLDs.</em></h3>
+		{% if not has_data %}
+		<div class="alert alert-warning" style="width:70%; margin:0 auto 1.5em auto;">
+			No completed decision steps found yet for this sim (<code>reverie/trading_log.json</code> hasn't been written -- the run may still be in progress or hasn't started). Desks will render with no activity data until it exists.
+		</div>
+		{% endif %}
+	</div>
+
+	<div id="game-container" style="text-align: center"></div>
+
+	<div style="width:55%; margin: 0 auto; margin-top:2em">
+		<div class="row">
+			<div class="col-md-6">
+				<h3 style="margin-bottom:0"><span id="game-time-content"></span> &nbsp; <span id="live_badge" style="font-size:0.5em; vertical-align:middle;"></span></h3>
+				<div>Step <span id="step-content">{{ step }}</span> / <span id="max-step-content">0</span></div>
+			</div>
+			<div class="col-md-6" style="text-align:right; padding-top:0.8em;">
+				<button id="prev_button" type="button" class="btn btn-default">
+					<i class="glyphicon glyphicon-step-backward"></i>
+				</button>
+				<button id="play_button" type="button" class="btn btn-default">
+					<i class="glyphicon glyphicon-play"></i> Play
+				</button>
+				<button id="pause_button" type="button" class="btn btn-default">
+					<i class="glyphicon glyphicon-pause"></i> Pause
+				</button>
+				<button id="next_button" type="button" class="btn btn-default">
+					<i class="glyphicon glyphicon-step-forward"></i>
+				</button>
+			</div>
+		</div>
+		<input type="range" id="step_slider" min="0" max="0" value="{{ step }}" style="width:100%; margin-top:0.8em;">
+	</div>
+
+	<div style="width:55%; margin:1.5em auto; background-color:#EEEEEE; border-radius:10px; padding:1em; text-align:center;">
+		<strong>Market:</strong> <span id="market_ticker">—</span>
+	</div>
+
+	<div id="interaction_banner" style="display:none; width:55%; margin:0 auto 1.5em auto; background-color:#E8F0FE; border-left:4px solid #4285F4; border-radius:6px; padding:1em; text-align:left;"></div>
+
+	<div style="width:55%; margin:0 auto;">
+		<div class="row">
+		{% for p in persona_names %}
+			<div class="col-md-4" style="text-align:center; margin-bottom:0.8em;">
+				<a href="#" id="on_screen_det_trigger-{{p.underscore}}" class="trading-map-persona-trigger">
+					<div id="on_screen_det_trigger_container-{{p.underscore}}" style="padding:0.5em; border-radius:10px;">
+						{% with 'assets/characters/profile/'|add:p.underscore|add:'.png' as image_static %}
+						<img src="{% static image_static %}" style="width:46px;">
+						{% endwith %}
+						<div>{{ p.original }}</div>
+						<span style="font-size:1.5em" id="quick_emoji-{{p.underscore}}"></span>
+					</div>
+				</a>
+			</div>
+		{% endfor %}
+		</div>
+	</div>
+
+	<div class="media" id="on_screen_det_content-init" style="width:55%; margin:0 auto; background-color:#EEEEEE; padding:1em; padding-left:2em; border-radius:10px;">
+		<em>Click on one of the agents above to see their current action, reasoning, and retry/fallback status.</em>
+	</div>
+
+	{% for p in persona_names %}
+	<div class="media" id="on_screen_det_content-{{p.underscore}}" style="width:55%; margin:0 auto; background-color:#EEEEEE; padding:1em; padding-left:2em; border-radius:10px; display:none;">
+		<div class="media-left">
+			{% with 'assets/characters/profile/'|add:p.underscore|add:'.png' as image_static %}
+			<img src="{% static image_static %}" style="width:5em;">
+			{% endwith %}
+		</div>
+		<div class="media-body" style="padding-left:2em;">
+			<h3 style="margin-bottom:0.5em">{{ p.original }} &nbsp;&nbsp;<a href="#" id="state_details_link-{{p.underscore}}" target="_blank" style="font-size:0.55em">State Details</a></h3>
+			<p><strong>Status:</strong> <span id="status_badge__{{p.underscore}}"></span></p>
+			<p style="margin-bottom:0.3em"><strong>Current Action:</strong><br><span id="current_action__{{p.underscore}}"></span></p>
+			<p style="margin-bottom:0.3em"><strong>Reasoning:</strong><br><span id="reasoning__{{p.underscore}}"></span></p>
+			<p style="margin-bottom:0"><strong>Portfolio:</strong> $<span id="portfolio_value__{{p.underscore}}"></span> &nbsp;(cash $<span id="cash__{{p.underscore}}"></span>)</p>
+			<p><strong>Positions:</strong> <span id="positions__{{p.underscore}}"></span></p>
+		</div>
+	</div>
+	{% endfor %}
+
+</div>
+
+<div style="margin-top:6em"></div>
+
+{% endblock content %}
+
+
+{% block js_content %}
+<script src='https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.js'></script>
+{% include 'trading_map/main_script.html' %}
+<script>
+	{% for p in persona_names %}
+	$('#on_screen_det_trigger-{{p.underscore}}').click(function(e) {
+		e.preventDefault();
+		focus_persona("{{p.underscore}}");
+	});
+	{% endfor %}
+</script>
+{% endblock js_content %}

@@ -61,7 +61,13 @@ Return JSON only (no markdown):
 }}
 """
 
-    raw = ollama_request(prompt, max_tokens=120, stop=["\n\n"], timeout=120)
+    # Same LLM settings as make_trading_decision's _call_llm, and for the same
+    # measured reasons: format="json" for grammar-constrained decoding (phi3:mini
+    # otherwise intermittently emits bare `end="..."` keys, // comments and
+    # trailing commas), and 300 tokens because 120 truncated mid-string
+    # (done_reason="length"). Without these this call silently fell through to
+    # the canned fallback summary below instead of a real peer exchange.
+    raw = ollama_request(prompt, max_tokens=300, timeout=120, format="json")
     try:
         cleaned = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
         data = json.loads(cleaned)
