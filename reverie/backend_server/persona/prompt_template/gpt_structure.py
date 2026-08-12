@@ -19,8 +19,8 @@ from utils import *
 # Ollama server base URL (local). Update if your Ollama server runs elsewhere.
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_GENERATE_URL = OLLAMA_BASE_URL + "/api/generate"
-# Models to use - switched to phi3:mini (2.2 GB) for memory efficiency
-OLLAMA_CHAT_MODEL = "phi3:mini"
+# Models to use
+OLLAMA_CHAT_MODEL = "mistral"
 OLLAMA_EMBED_MODEL = "nomic-embed-text"
 
 def temp_sleep(seconds=0.1):

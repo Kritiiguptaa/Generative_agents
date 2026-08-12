@@ -70,7 +70,12 @@ from market_perceive    import market_perceive, record_trade_fill
 from trading_persona    import TradingPersona
 from trading_daily_plan import ensure_daily_plan, apply_interaction_to_plan, current_focus_str
 from trading_interactions import maybe_interaction
-from middleware.action_filtering    import run_action_filtering_step
+from middleware.action_filtering    import (
+    run_action_filtering_step,
+    log_action,
+    _parse_json_response,
+    _split_combined_action,
+)
 from middleware.persona_anchoring   import score_persona_consistency
 from middleware.memory_compression  import compress_memories
 from middleware.id_rag import (
@@ -93,23 +98,41 @@ from utils import fs_storage
 def make_trading_decision(persona: TradingPersona,
                           market:  MarketEnvironment,
                           retrieved: dict,
-                          action_log_path: str) -> dict:
+                          action_log_path: str,
+                          use_middleware: bool = True) -> dict:
     """
     Ask the LLM to decide what to do next.
     Returns ({"action", "symbol", "quantity", "reasoning"}, compression_stats).
 
-    Middleware applied here, in order:
+    Middleware arm (use_middleware=True), applied in order:
       1. compress_memories()  — dedup, prune superseded news, enforce budget
       2. id_rag_anchor()      — prepend context-relevant identity facts
       3. action filtering     — constrain the LLM to legal actions
-    """
-    # Middleware layer: compress the retrieval output before it reaches the LLM.
-    # Replaces the old arbitrary nodes[:6] truncation.
-    memory_context, mc_stats = compress_memories(retrieved, persona, market)
 
-    # ID-RAG: retrieve only the identity facts relevant to this context
-    # and prepend them. Replaces the static full-block anchor.
-    memory_context = id_rag_anchor(persona, memory_context)
+    Baseline arm (use_middleware=False) — the ablation comparison:
+      every retrieved memory is concatenated verbatim and handed to the LLM
+      with no compression, no identity retrieval, and no legal-action menu.
+      Return shape is identical so both arms are scored by the same
+      downstream code (execute_trading_action, _check_stale_reasoning,
+      score_persona_consistency, _generate_report).
+    """
+    if use_middleware:
+        # Middleware layer: compress the retrieval output before it reaches the
+        # LLM. Replaces the old arbitrary nodes[:6] truncation.
+        memory_context, mc_stats = compress_memories(retrieved, persona, market)
+
+        # ID-RAG: retrieve only the identity facts relevant to this context
+        # and prepend them. Replaces the static full-block anchor.
+        memory_context = id_rag_anchor(persona, memory_context)
+    else:
+        # Baseline: hand the LLM everything new_retrieve() returned, verbatim.
+        # No dedup, no supersession pruning, no budget -- this is the raw
+        # context the middleware exists to clean up.
+        raw_nodes = []
+        for nodes in retrieved.values():
+            raw_nodes.extend(nodes)
+        memory_context = "\n".join(n.description for n in raw_nodes)
+        mc_stats = {"enabled": False}
 
     def _call_llm(prompt: str) -> str:
         # format="json": grammar-constrained decoding. phi3:mini otherwise
@@ -121,16 +144,118 @@ def make_trading_decision(persona: TradingPersona,
         #   completions run ~70-135 tokens, so 300 is real headroom.
         # No stop=["\n\n"]: in JSON mode the object ends when it closes, and a
         #   blank line inside pretty-printed JSON would cut it off early.
+        # Identical settings in both arms -- the switch changes what goes into
+        # the prompt, never how the model is sampled.
         return ollama_request(prompt, max_tokens=300, timeout=300, format="json")
 
-    decision = run_action_filtering_step(
-        persona,
-        market,
-        memory_context,
-        _call_llm,
-        action_log_path,
-    )
+    if use_middleware:
+        decision = run_action_filtering_step(
+            persona,
+            market,
+            memory_context,
+            _call_llm,
+            action_log_path,
+        )
+    else:
+        decision = free_form_decision(
+            persona,
+            market,
+            memory_context,
+            _call_llm,
+            action_log_path,
+        )
     return decision, mc_stats
+
+
+def free_form_decision(persona: TradingPersona,
+                       market:  MarketEnvironment,
+                       memory_context: str,
+                       llm_call,
+                       action_log_path: str) -> dict:
+    """
+    Baseline (no-middleware) decision path.
+
+    Gives the LLM the persona, the portfolio, the prices and the full memory
+    context, then takes whatever it returns -- no legal-action menu, no
+    legality validation, no retry-on-illegal. An unaffordable buy or a sell of
+    unowned stock is passed straight through to execute_trading_action(), which
+    is what flags it as a hallucination. That is the whole point of this arm.
+
+    The JSON *parsing* helpers from action_filtering are reused deliberately:
+    stripping markdown fences and splitting a combined {"action": "BUY NVDA"}
+    field is small-model formatting cleanup, not decision constraint. Doing it
+    identically in both arms keeps the comparison about decision quality rather
+    than about which arm had a fussier parser.
+    """
+    s = persona.scratch
+    prompt = f"""You are {s.name}, a {getattr(s, 'trader_type', None) or 'generalist'} trader.
+Traits: {getattr(s, 'innate', '')}
+Background: {getattr(s, 'learned', '')}
+Current situation: {getattr(s, 'currently', '')}
+Risk tolerance: {getattr(s, 'risk_tolerance', '')}
+
+Current state:
+- Cash: ${s.cash_balance:,.2f}
+- Holdings: {s.positions}
+
+Market:
+- Prices: {market.current_prices}
+
+Memory:
+{memory_context}
+
+Decide your next action: buy, sell, hold, or analyze.
+Respond ONLY in this JSON format:
+{{"action": "buy/sell/hold/analyze", "symbol": "TICKER or null", "quantity": number, "reasoning": "why"}}
+"""
+
+    name = s.name
+    fallback = {"action": "hold", "symbol": None, "quantity": 0, "reasoning": ""}
+
+    raw = llm_call(prompt)
+    response, error = _parse_json_response(raw)
+    if response is None:
+        log_action(action_log_path, name, fallback, "fallback", error or "unparseable")
+        return fallback
+
+    # ── normalise shape only (same normalisation the filtered arm applies) ──
+    action_type, symbol_hint = _split_combined_action(response.get("action"))
+    if action_type is None:
+        log_action(action_log_path, name, fallback, "fallback", "missing action")
+        return fallback
+    action = action_type.lower()
+    if action not in ("buy", "sell", "hold", "analyze"):
+        log_action(action_log_path, name, fallback, "fallback",
+                   f"unknown action {action!r}")
+        return fallback
+
+    symbol = response.get("symbol")
+    if symbol is None:
+        symbol = response.get("ticker")
+    if symbol is None:
+        symbol = symbol_hint
+    if isinstance(symbol, str):
+        symbol = symbol.strip().upper()
+        # phi3:mini emits the *string* "null"/"none" rather than JSON null.
+        if symbol in ("NULL", "NONE", ""):
+            symbol = None
+
+    quantity = response.get("quantity")
+    try:
+        quantity = int(quantity)
+    except (TypeError, ValueError):
+        quantity = 0
+
+    decision = {
+        "action":    action,
+        "symbol":    symbol,
+        "quantity":  quantity,
+        "reasoning": response.get("reasoning", ""),
+    }
+    # "success" here means "parsed", not "legal" -- nothing was checked against
+    # cash, holdings or risk limits on this path.
+    log_action(action_log_path, name, decision, "success")
+    return decision
 
 
 # ===========================================================================
@@ -292,9 +417,11 @@ def _check_stale_reasoning(reasoning: str, current_step: int,
 
 class TradingReverie:
 
-    def __init__(self, sim_code: str, fork_sim_code: str = "base_trading"):
-        self.sim_code      = sim_code
-        self.fork_sim_code = fork_sim_code
+    def __init__(self, sim_code: str, fork_sim_code: str = "base_trading",
+                 use_middleware: bool = True):
+        self.sim_code       = sim_code
+        self.fork_sim_code  = fork_sim_code
+        self.use_middleware = use_middleware
         self.sim_folder    = f"{fs_storage}/{sim_code}"
         self.market        = HistoricalMarketEnvironment(seed=42)
         self.action_filter_log_path = str(
@@ -330,6 +457,8 @@ class TradingReverie:
         for persona in self.personas.values():
             ensure_daily_plan(persona, self.market, force=True)
 
+        print(f"[TradingReverie] Middleware: "
+              f"{'ENABLED' if self.use_middleware else 'DISABLED (baseline arm)'}")
         print(f"[TradingReverie] Loaded {len(self.personas)} agents: "
               f"{list(self.personas.keys())}")
         for name, p in self.personas.items():
@@ -473,6 +602,7 @@ class TradingReverie:
             self.market,
             retrieved,
             self.action_filter_log_path,
+            use_middleware=self.use_middleware,
         )
         print(f"  [{name}] decision: {decision.get('action','?')} "
               f"{decision.get('symbol','')} x{decision.get('quantity','')}")
@@ -652,6 +782,7 @@ class TradingReverie:
 
         total_decisions = sum(a["total_decisions"] for a in per_agent.values()) or 1
         return {
+            "middleware_enabled":          self.use_middleware,
             "simulation_steps":            n_steps,
             "total_log_entries":           len(log),
             "total_hallucinations":        total_hallucinations,
@@ -665,6 +796,8 @@ class TradingReverie:
         print(f"\n{sep}")
         print("HALLUCINATION REPORT")
         print(sep)
+        print(f"Middleware      : "
+              f"{'ENABLED' if report.get('middleware_enabled') else 'DISABLED (baseline)'}")
         print(f"Steps simulated : {report['simulation_steps']}")
         print(f"Total decisions : {report['total_log_entries']}")
         print(f"Total hallucinations : {report['total_hallucinations']}  "
@@ -739,9 +872,16 @@ def main():
                         help="Name for the new simulation run")
     parser.add_argument("--steps", type=int, default=120,
                         help="Number of market steps to simulate")
+    parser.add_argument("--no-middleware", action="store_true",
+                        help="Baseline arm: disable memory compression, ID-RAG "
+                             "anchoring and the action-filtering legal-action "
+                             "menu. Scoring is unchanged, so the resulting "
+                             "hallucination_report.json is directly comparable "
+                             "to a normal run.")
     args = parser.parse_args()
 
-    sim = TradingReverie(args.sim, args.fork)
+    sim = TradingReverie(args.sim, args.fork,
+                         use_middleware=not args.no_middleware)
     sim.run(args.steps)
 
 
