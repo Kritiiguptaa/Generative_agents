@@ -75,8 +75,14 @@ from middleware.action_filtering    import (
     log_action,
     _parse_json_response,
     _split_combined_action,
+    _market_is_open,
+    _get_tradeable_symbols,
+    coerce_quantity,
 )
-from middleware.persona_anchoring   import score_persona_consistency
+from middleware.persona_anchoring   import (
+    score_persona_consistency,
+    PERSONA_DRIFT_THRESHOLD,
+)
 from middleware.memory_compression  import compress_memories
 from middleware.id_rag import (
     id_rag_anchor,
@@ -102,7 +108,10 @@ def make_trading_decision(persona: TradingPersona,
                           use_middleware: bool = True) -> dict:
     """
     Ask the LLM to decide what to do next.
-    Returns ({"action", "symbol", "quantity", "reasoning"}, compression_stats).
+    Returns (decision, compression_stats, filter_stats), where decision is
+    {"action", "symbol", "quantity", "reasoning"} and filter_stats carries the
+    pre-filter request -- see run_action_filtering_step() for why that has to be
+    threaded out of here rather than recovered downstream.
 
     Middleware arm (use_middleware=True), applied in order:
       1. compress_memories()  — dedup, prune superseded news, enforce budget
@@ -132,7 +141,23 @@ def make_trading_decision(persona: TradingPersona,
         for nodes in retrieved.values():
             raw_nodes.extend(nodes)
         memory_context = "\n".join(n.description for n in raw_nodes)
-        mc_stats = {"enabled": False}
+        # Report the size of the context even though nothing compressed it. This
+        # arm was observed choosing "analyze" on 100% of decisions, and the
+        # leading hypothesis is that the uncompressed block is large enough to
+        # crowd out the instruction -- untestable while the stats said only
+        # {"enabled": False}. nodes_out == nodes_in because nothing was dropped.
+        mc_stats = {
+            "enabled":           False,
+            "nodes_in":          len(raw_nodes),
+            "nodes_out":         len(raw_nodes),
+            "dropped_duplicate": 0,
+            "dropped_stale":     0,
+            "dropped_budget":    0,
+            "annotated_stale":   0,
+            "compression_ratio": 1.0,
+            "chars_in":          len(memory_context),
+            "chars_out":         len(memory_context),
+        }
 
     def _call_llm(prompt: str) -> str:
         # format="json": grammar-constrained decoding. phi3:mini otherwise
@@ -149,7 +174,7 @@ def make_trading_decision(persona: TradingPersona,
         return ollama_request(prompt, max_tokens=300, timeout=300, format="json")
 
     if use_middleware:
-        decision = run_action_filtering_step(
+        decision, filter_stats = run_action_filtering_step(
             persona,
             market,
             memory_context,
@@ -157,14 +182,14 @@ def make_trading_decision(persona: TradingPersona,
             action_log_path,
         )
     else:
-        decision = free_form_decision(
+        decision, filter_stats = free_form_decision(
             persona,
             market,
             memory_context,
             _call_llm,
             action_log_path,
         )
-    return decision, mc_stats
+    return decision, mc_stats, filter_stats
 
 
 def free_form_decision(persona: TradingPersona,
@@ -186,8 +211,21 @@ def free_form_decision(persona: TradingPersona,
     field is small-model formatting cleanup, not decision constraint. Doing it
     identically in both arms keeps the comparison about decision quality rather
     than about which arm had a fussier parser.
+
+    For the same reason this prompt states the same tradeable universe, market
+    status and action vocabulary that the filtered arm's legal-action menu
+    states. The ablation is "is the menu enforced?", not "did the two arms even
+    know about the same symbols?" -- previously the filtered arm was restricted
+    to the watchlist and offered no ANALYZE, so the arms' action distributions
+    were not comparable.
+
+    Returns (decision, stats) with the same shape run_action_filtering_step()
+    returns. illegal_request is always False here: this arm has no legality
+    check, so illegality is detected downstream by execute_trading_action().
     """
     s = persona.scratch
+    tradeable = _get_tradeable_symbols(persona, market)
+    market_open = "OPEN" if _market_is_open(market) else "CLOSED"
     prompt = f"""You are {s.name}, a {getattr(s, 'trader_type', None) or 'generalist'} trader.
 Traits: {getattr(s, 'innate', '')}
 Background: {getattr(s, 'learned', '')}
@@ -199,7 +237,9 @@ Current state:
 - Holdings: {s.positions}
 
 Market:
+- Status: {market_open}
 - Prices: {market.current_prices}
+- Tradeable symbols: {', '.join(tradeable)}
 
 Memory:
 {memory_context}
@@ -211,23 +251,27 @@ Respond ONLY in this JSON format:
 
     name = s.name
     fallback = {"action": "hold", "symbol": None, "quantity": 0, "reasoning": ""}
+    stats = {"status": "success", "illegal_request": False,
+             "error_reason": "", "requested": {}}
+
+    def _fail(reason: str):
+        log_action(action_log_path, name, fallback, "fallback", reason)
+        stats["status"] = "fallback"
+        stats["error_reason"] = reason
+        return fallback, stats
 
     raw = llm_call(prompt)
     response, error = _parse_json_response(raw)
     if response is None:
-        log_action(action_log_path, name, fallback, "fallback", error or "unparseable")
-        return fallback
+        return _fail(error or "unparseable")
 
     # ── normalise shape only (same normalisation the filtered arm applies) ──
     action_type, symbol_hint = _split_combined_action(response.get("action"))
     if action_type is None:
-        log_action(action_log_path, name, fallback, "fallback", "missing action")
-        return fallback
+        return _fail("missing action")
     action = action_type.lower()
     if action not in ("buy", "sell", "hold", "analyze"):
-        log_action(action_log_path, name, fallback, "fallback",
-                   f"unknown action {action!r}")
-        return fallback
+        return _fail(f"unknown action {action!r}")
 
     symbol = response.get("symbol")
     if symbol is None:
@@ -240,10 +284,9 @@ Respond ONLY in this JSON format:
         if symbol in ("NULL", "NONE", ""):
             symbol = None
 
-    quantity = response.get("quantity")
-    try:
-        quantity = int(quantity)
-    except (TypeError, ValueError):
+    # Same coercion the filtered arm applies -- see coerce_quantity().
+    quantity = coerce_quantity(response.get("quantity"))
+    if quantity is None:
         quantity = 0
 
     decision = {
@@ -255,7 +298,8 @@ Respond ONLY in this JSON format:
     # "success" here means "parsed", not "legal" -- nothing was checked against
     # cash, holdings or risk limits on this path.
     log_action(action_log_path, name, decision, "success")
-    return decision
+    stats["requested"] = {"action": action, "symbol": symbol, "quantity": quantity}
+    return decision, stats
 
 
 # ===========================================================================
@@ -267,83 +311,141 @@ def execute_trading_action(persona: TradingPersona,
                            decision: dict) -> dict:
     """
     Validate decision against hard portfolio constraints, then execute.
-    Returns a result dict with keys: outcome_str, fill (or None), filtered (bool).
 
-    Action filtering rules (your middleware will enforce these; here they act
-    as the ground-truth validator that reveals hallucinations):
+    Returns a result dict with keys:
+      outcome_str, fill (or None), filtered (bool), hallucination (bool),
+      halluc_kind (str), requested_quantity (int), filled_quantity (int).
+
+    `filtered` means the order was rejected outright. `hallucination` means the
+    LLM asked for something it was not entitled to -- which includes the
+    rejected cases AND the *clamped* ones. Those used to be scored clean: an
+    agent asking to buy 5000 shares it could not afford was silently reduced to
+    the affordable quantity, printed as an informational "[ACTION FILTER]" line
+    and logged with filtered=False. That is the exact hallucination this module
+    was built to count (see the module docstring's Marcus Webb example), so
+    repairing it and reporting success made the headline metric unable to
+    observe its own primary trigger.
+
+    Rules enforced (this is the ground-truth validator that reveals
+    hallucinations; the middleware arm additionally prevents them upstream):
+      0. No trading while the market is closed.
+      0b. Symbol must be in the agent's tradeable universe.
       1. Buy cost must not exceed available cash.
       2. Agent cannot sell more shares than it owns.
       3. Single trade value must not exceed risk_limit_per_trade × portfolio.
     """
     action   = decision.get("action", "hold")
     symbol   = decision.get("symbol")
-    quantity = decision.get("quantity") or 0
     reason   = decision.get("reasoning", "")
+    try:
+        requested = int(decision.get("quantity") or 0)
+    except (TypeError, ValueError):
+        requested = 0
 
     name = persona.scratch.name
 
+    def _result(outcome_str, fill=None, filtered=False,
+                hallucination=False, kind="", filled=0):
+        return {"outcome_str": outcome_str, "fill": fill, "filtered": filtered,
+                "hallucination": hallucination, "halluc_kind": kind,
+                "requested_quantity": requested, "filled_quantity": filled}
+
     if action in ("hold", "analyze") or not symbol:
         verb = "holds" if action == "hold" else "analyzes market"
-        return {"outcome_str": f"{name} {verb}. {reason}",
-                "fill": None, "filtered": False}
+        return _result(f"{name} {verb}. {reason}")
+
+    # ── Rule 0: market hours. Previously only the middleware arm checked this
+    # (via get_legal_actions), so the baseline arm could trade at 3am while the
+    # filtered arm was frozen at HOLD -- an asymmetry that shows up as an
+    # action-distribution difference on any run longer than one session.
+    if not _market_is_open(market):
+        return _result(
+            f"[FILTERED] {name} tried to {action.upper()} {requested} {symbol} "
+            f"but the market is closed.",
+            filtered=True, hallucination=True, kind="market_closed")
+
+    # ── Rule 0b: symbol must be in the agent's tradeable universe ──────────
+    tradeable = _get_tradeable_symbols(persona, market)
+    if symbol not in tradeable:
+        return _result(
+            f"[FILTERED] {name} tried to {action.upper()} {symbol!r}, which is "
+            f"not in its tradeable universe ({', '.join(tradeable)}).",
+            filtered=True, hallucination=True, kind="untradeable_symbol")
 
     price = market.current_prices.get(symbol)
     if not price:
-        return {"outcome_str": f"[FILTERED] {name}: unknown symbol {symbol!r}",
-                "fill": None, "filtered": True}
+        return _result(f"[FILTERED] {name}: unknown symbol {symbol!r}",
+                       filtered=True, hallucination=True, kind="unknown_symbol")
 
     # ── portfolio value for risk-limit check ───────────────────────────────
     pv = persona.portfolio_value(market.current_prices)
 
     if action == "buy":
-        requested_cost = price * quantity
+        requested_cost = price * requested
         max_by_cash    = int(persona.scratch.cash_balance / price)
         max_by_risk    = int(pv * persona.scratch.risk_limit_per_trade / price)
         max_qty        = min(max_by_cash, max_by_risk)
 
-        # ── HALLUCINATION TRIGGER: agent asks for more than it can afford ──
-        if quantity > max_by_cash:
-            print(f"  [ACTION FILTER] {name} tried to buy {quantity} {symbol} "
-                  f"(${requested_cost:,.0f}) but cash=${persona.scratch.cash_balance:,.0f}. "
-                  f"Adjusted to {max_qty}.")
-
         if max_qty <= 0:
-            return {"outcome_str":
-                        f"[FILTERED] {name} tried to buy {symbol} but "
-                        f"insufficient cash (${persona.scratch.cash_balance:,.0f}) "
-                        f"or risk limit reached.",
-                    "fill": None, "filtered": True}
+            return _result(
+                f"[FILTERED] {name} tried to buy {requested} {symbol} but "
+                f"insufficient cash (${persona.scratch.cash_balance:,.0f}) "
+                f"or risk limit reached.",
+                filtered=True, hallucination=True,
+                kind="unaffordable" if requested > max_by_cash else "over_risk_limit")
 
-        quantity = max_qty
+        # ── HALLUCINATION: agent asked for more than it was entitled to. The
+        # order still executes at the clamped size (that is the middleware's
+        # job), but the *request* was illegal and is counted as such.
+        quantity = min(requested, max_qty)
+        kind = ""
+        if requested > max_qty:
+            kind = "clamped_cash" if requested > max_by_cash else "clamped_risk"
+            print(f"  [ACTION FILTER] {name} tried to buy {requested} {symbol} "
+                  f"(${requested_cost:,.0f}) but cash="
+                  f"${persona.scratch.cash_balance:,.0f}, risk cap={max_by_risk}. "
+                  f"Adjusted to {quantity}.")
+
         fill = market.execute_order(name, {"type": "buy", "symbol": symbol,
                                            "quantity": quantity})
-        # Update portfolio
+        # Update portfolio. Cost basis uses the actual fill price, not the mid:
+        # cash is debited fill["total_value"], so booking avg_price at `price`
+        # understated the basis by the spread, slippage and commission.
         s = persona.scratch
         s.cash_balance -= fill["total_value"]
+        unit_cost = fill["total_value"] / quantity
         if symbol in s.positions:
             old   = s.positions[symbol]
             total = old["qty"] + quantity
-            avg   = (old["qty"] * old["avg_price"] + quantity * price) / total
+            avg   = (old["qty"] * old["avg_price"] + quantity * unit_cost) / total
             s.positions[symbol] = {"qty": total, "avg_price": round(avg, 2)}
         else:
-            s.positions[symbol] = {"qty": quantity, "avg_price": price}
+            s.positions[symbol] = {"qty": quantity, "avg_price": round(unit_cost, 2)}
 
-        return {"outcome_str":
-                    f"{name} BUYS {quantity} {symbol} @ ${price:.2f} "
-                    f"(total ${fill['total_value']:,.0f}). {reason}",
-                "fill": fill, "filtered": False}
+        return _result(
+            f"{name} BUYS {quantity} {symbol} @ ${price:.2f} "
+            f"(total ${fill['total_value']:,.0f}). {reason}",
+            fill=fill, hallucination=bool(kind), kind=kind, filled=quantity)
 
     elif action == "sell":
         owned = persona.scratch.positions.get(symbol, {}).get("qty", 0)
 
-        # ── HALLUCINATION TRIGGER: agent tries to sell shares it doesn't own ─
+        # ── HALLUCINATION: agent tries to sell shares it doesn't own ────────
         if owned == 0:
-            return {"outcome_str":
-                        f"[FILTERED] {name} tried to SELL {quantity} {symbol} "
-                        f"but owns 0 shares.",
-                    "fill": None, "filtered": True}
+            return _result(
+                f"[FILTERED] {name} tried to SELL {requested} {symbol} "
+                f"but owns 0 shares.",
+                filtered=True, hallucination=True, kind="unowned")
 
-        quantity = min(quantity, owned)
+        # ── HALLUCINATION: asking to sell 500 when you hold 10 is an illegal
+        # request even though it is trivially satisfiable at a smaller size.
+        quantity = min(requested, owned)
+        kind = ""
+        if requested > owned:
+            kind = "clamped_holdings"
+            print(f"  [ACTION FILTER] {name} tried to sell {requested} {symbol} "
+                  f"but owns {owned}. Adjusted to {quantity}.")
+
         fill = market.execute_order(name, {"type": "sell", "symbol": symbol,
                                            "quantity": quantity})
         s = persona.scratch
@@ -352,13 +454,12 @@ def execute_trading_action(persona: TradingPersona,
         if s.positions[symbol]["qty"] == 0:
             del s.positions[symbol]
 
-        return {"outcome_str":
-                    f"{name} SELLS {quantity} {symbol} @ ${price:.2f} "
-                    f"(total ${fill['total_value']:,.0f}). {reason}",
-                "fill": fill, "filtered": False}
+        return _result(
+            f"{name} SELLS {quantity} {symbol} @ ${price:.2f} "
+            f"(total ${fill['total_value']:,.0f}). {reason}",
+            fill=fill, hallucination=bool(kind), kind=kind, filled=quantity)
 
-    return {"outcome_str": f"{name} holds (unknown action).",
-            "fill": None, "filtered": False}
+    return _result(f"{name} holds (unknown action).")
 
 
 # ===========================================================================
@@ -418,7 +519,7 @@ def _check_stale_reasoning(reasoning: str, current_step: int,
 class TradingReverie:
 
     def __init__(self, sim_code: str, fork_sim_code: str = "base_trading",
-                 use_middleware: bool = True):
+                 use_middleware: bool = True, fresh: bool = False):
         self.sim_code       = sim_code
         self.fork_sim_code  = fork_sim_code
         self.use_middleware = use_middleware
@@ -428,12 +529,34 @@ class TradingReverie:
             Path(self.sim_folder) / "reverie" / "action_filter_log.csv"
         )
 
-        # Copy base simulation folder if target doesn't exist yet
+        # Copy base simulation folder if target doesn't exist yet.
+        #
+        # Reusing an existing --sim name used to silently RESUME it: personas
+        # are persisted by _save(), the market is not, so the agents came back
+        # holding positions they had bought at step-N prices while the market
+        # was reconstructed at step 0. Two arms run under recycled sim names
+        # therefore started from different portfolios -- which is how a baseline
+        # and a middleware run of the same fork reported different starting
+        # portfolio values for the same agent, making every cross-arm PnL and
+        # rate comparison meaningless. Resuming is refused rather than repaired
+        # because there is no market checkpoint to resume against.
         fork_path = Path(f"{fs_storage}/{fork_sim_code}")
         sim_path  = Path(self.sim_folder)
-        if not sim_path.exists():
-            shutil.copytree(fork_path, sim_path)
-            print(f"[TradingReverie] Forked '{fork_sim_code}' -> '{sim_code}'")
+        if sim_path.exists() and fresh:
+            shutil.rmtree(sim_path)
+            print(f"[TradingReverie] --fresh: removed existing '{sim_code}'")
+        if sim_path.exists():
+            raise SystemExit(
+                f"[TradingReverie] Simulation '{sim_code}' already exists at\n"
+                f"  {sim_path}\n"
+                f"Resuming is not supported: persona state is saved but market "
+                f"state is not, so a resumed run starts agents with existing "
+                f"positions against a step-0 market and is not comparable to a "
+                f"fresh run.\n"
+                f"Use a new --sim name, or pass --fresh to delete and re-fork it."
+            )
+        shutil.copytree(fork_path, sim_path)
+        print(f"[TradingReverie] Forked '{fork_sim_code}' -> '{sim_code}'")
 
         # Load meta
         meta_path = sim_path / "reverie" / "meta.json"
@@ -597,7 +720,7 @@ class TradingReverie:
         retrieved = new_retrieve(persona, focal_points, n_count=15)
 
         # 5. Decide  ← memory compression + ID-RAG anchoring applied inside
-        decision, mc_stats = make_trading_decision(
+        decision, mc_stats, filter_stats = make_trading_decision(
             persona,
             self.market,
             retrieved,
@@ -617,9 +740,22 @@ class TradingReverie:
         result = execute_trading_action(persona, self.market, decision)
         outcome = result["outcome_str"]
 
+        # An action hallucination is observable in two different places
+        # depending on the arm, and counting only one of them is what made this
+        # metric read 0 in both arms:
+        #   - middleware arm: the illegal request is rejected by
+        #     run_action_filtering_step() and never reaches execution, so it is
+        #     only visible in filter_stats.
+        #   - baseline arm: there is no filter, so it surfaces at execution.
+        # The union is the real count.
+        illegal_request = bool(filter_stats.get("illegal_request"))
+        hallucinated = bool(result["hallucination"]) or illegal_request
+        halluc_kind = result["halluc_kind"] or (
+            "illegal_request" if illegal_request else "")
+
         # Print with clear hallucination markers
-        if result["filtered"]:
-            print(f"  [{name}] *** HALLUCINATION CAUGHT *** {outcome}")
+        if hallucinated:
+            print(f"  [{name}] *** HALLUCINATION CAUGHT *** [{halluc_kind}] {outcome}")
         else:
             print(f"  [{name}] {outcome}")
 
@@ -639,8 +775,10 @@ class TradingReverie:
                   f"outdated news: {stale_flag}")
 
         # 8b. Persona consistency — did the LLM stay in character?
+        # None means "not scoreable" (no reasoning was produced at all), which
+        # is distinct from "scored badly" and must not be averaged in as either.
         drift_score = score_persona_consistency(reasoning, persona)
-        if drift_score < 0.67:
+        if drift_score is not None and drift_score < PERSONA_DRIFT_THRESHOLD:
             print(f"  [{name}] *** PERSONA DRIFT *** consistency score "
                   f"{drift_score:.2f} (reasoning may contradict agent profile)")
 
@@ -650,8 +788,21 @@ class TradingReverie:
             "step":                step,
             "agent":               name,
             "decision":            decision,
+            "requested":           filter_stats.get("requested") or {},
+            "filter_status":       filter_stats.get("status", "success"),
             "outcome":             outcome,
-            "hallucination":       result["filtered"],
+            "hallucination":       hallucinated,
+            "halluc_kind":         halluc_kind,
+            "illegal_request":     illegal_request,
+            "requested_quantity":  result["requested_quantity"],
+            "filled_quantity":     result["filled_quantity"],
+            "filtered":            result["filtered"],
+            # Both the stale-context scan and the persona-consistency score read
+            # `reasoning`. An empty one scores clean on both for free, so a run
+            # that fails to parse often looks like a run that reasons well.
+            # Recorded per step so the report can use it as the denominator
+            # instead of counting unscoreable decisions as passes.
+            "has_reasoning":       bool((reasoning or "").strip()),
             "stale_context":       stale_flag,
             "persona_drift_score": drift_score,
             "compression":         mc_stats,
@@ -677,12 +828,19 @@ class TradingReverie:
         """
         from collections import defaultdict
 
+        from collections import Counter
+
         agents = list(self.personas.keys())
         per_agent = {
             name: {
                 "total_decisions":       0,
                 "active_decisions":      0,  # buy or sell (not hold/analyze)
+                "trade_attempts":        0,  # buy/sell REQUESTED, pre-filter
                 "action_hallucinations": 0,
+                "halluc_kinds":          Counter(),
+                "fallback_decisions":    0,
+                "reasoned_decisions":    0,  # non-empty reasoning: the only
+                                             # decisions stale/drift can score
                 "stale_context_hits":    0,
                 "drift_scores":          [],  # persona_drift_score per step
                 "mc_nodes_in":           0,
@@ -691,6 +849,8 @@ class TradingReverie:
                 "mc_dropped_stale":      0,
                 "mc_dropped_budget":     0,
                 "mc_annotated_stale":    0,
+                "mc_chars_in":           0,
+                "mc_chars_out":          0,
                 "action_counts":         {"buy": 0, "sell": 0,
                                           "hold": 0, "analyze": 0},
                 "start_portfolio":       0.0,
@@ -718,8 +878,23 @@ class TradingReverie:
             if action in ("buy", "sell"):
                 ag["active_decisions"] += 1
 
+            # The denominator for a hallucination rate has to be what the model
+            # *asked* to do, not what it was allowed to do. Using executed
+            # buy/sell counts meant a run where every illegal trade was blocked
+            # divided by ~0 and reported 0.0%.
+            requested_action = (entry.get("requested") or {}).get("action") or action
+            if requested_action in ("buy", "sell"):
+                ag["trade_attempts"] += 1
+
+            if entry.get("filter_status") == "fallback":
+                ag["fallback_decisions"] += 1
+
+            if entry.get("has_reasoning"):
+                ag["reasoned_decisions"] += 1
+
             if entry.get("hallucination"):
                 ag["action_hallucinations"] += 1
+                ag["halluc_kinds"][entry.get("halluc_kind") or "unspecified"] += 1
 
             if entry.get("stale_context"):
                 ag["stale_context_hits"] += 1
@@ -735,6 +910,8 @@ class TradingReverie:
             ag["mc_dropped_stale"]     += mc.get("dropped_stale", 0)
             ag["mc_dropped_budget"]    += mc.get("dropped_budget", 0)
             ag["mc_annotated_stale"]   += mc.get("annotated_stale", 0)
+            ag["mc_chars_in"]          += mc.get("chars_in", 0)
+            ag["mc_chars_out"]         += mc.get("chars_out", 0)
 
             # Last seen entry = end state
             ag["end_portfolio"] = entry["portfolio_value"]
@@ -743,26 +920,46 @@ class TradingReverie:
         summary = {}
         total_hallucinations = 0
         for name, ag in per_agent.items():
-            active = ag["active_decisions"] or 1   # avoid /0
             total  = ag["total_decisions"]  or 1
 
-            action_h_rate  = round(ag["action_hallucinations"] / active * 100, 1)
-            stale_rate     = round(ag["stale_context_hits"]    / total  * 100, 1)
+            # None, not 0.0, when the agent never attempted a trade: there is
+            # nothing to have hallucinated about, and printing "0.0%" for a 0/0
+            # made a vacuous result look like a measured one.
+            attempts = ag["trade_attempts"]
+            action_h_rate = (round(ag["action_hallucinations"] / attempts * 100, 1)
+                             if attempts else None)
+            # Stale context is only observable in reasoning text, so an empty
+            # reasoning is not a clean decision -- it is an unscored one.
+            # Dividing by all decisions let a high fallback rate masquerade as a
+            # low stale-context rate, which is the single most likely
+            # explanation for a large baseline-vs-middleware gap on this metric.
+            reasoned = ag["reasoned_decisions"]
+            stale_rate = (round(ag["stale_context_hits"] / reasoned * 100, 1)
+                          if reasoned else None)
+            fallback_rate  = round(ag["fallback_decisions"]    / total  * 100, 1)
             pnl            = round(ag["end_portfolio"] - ag["start_portfolio"], 2)
 
+            # drift_scores only ever collects non-None values, so this averages
+            # over decisions that were actually scoreable.
             scores = ag["drift_scores"]
             avg_drift  = round(sum(scores) / len(scores), 2) if scores else None
-            drift_events = sum(1 for s in scores if s < 0.67)
+            drift_events = sum(1 for s in scores if s < PERSONA_DRIFT_THRESHOLD)
 
             summary[name] = {
                 "total_decisions":              ag["total_decisions"],
                 "active_decisions":             ag["active_decisions"],
+                "trade_attempts":               ag["trade_attempts"],
                 "action_hallucinations":        ag["action_hallucinations"],
                 "action_hallucination_rate_pct": action_h_rate,
+                "hallucination_kinds":          dict(ag["halluc_kinds"]),
+                "fallback_decisions":           ag["fallback_decisions"],
+                "fallback_rate_pct":            fallback_rate,
+                "reasoned_decisions":           ag["reasoned_decisions"],
                 "stale_context_hits":           ag["stale_context_hits"],
                 "stale_context_rate_pct":       stale_rate,
                 "avg_persona_consistency":      avg_drift,
                 "persona_drift_events":         drift_events,
+                "scored_decisions":             len(scores),
                 "memory_compression": {
                     "nodes_in":          ag["mc_nodes_in"],
                     "nodes_out":         ag["mc_nodes_out"],
@@ -772,6 +969,10 @@ class TradingReverie:
                     "dropped_stale":     ag["mc_dropped_stale"],
                     "dropped_budget":    ag["mc_dropped_budget"],
                     "annotated_stale":   ag["mc_annotated_stale"],
+                    "chars_in":          ag["mc_chars_in"],
+                    "chars_out":         ag["mc_chars_out"],
+                    "avg_context_chars": (round(ag["mc_chars_out"] / total)
+                                          if total else 0),
                 },
                 "action_distribution":          ag["action_counts"],
                 "start_portfolio_usd":          ag["start_portfolio"],
@@ -780,14 +981,21 @@ class TradingReverie:
             }
             total_hallucinations += ag["action_hallucinations"]
 
-        total_decisions = sum(a["total_decisions"] for a in per_agent.values()) or 1
+        total_decisions = sum(a["total_decisions"] for a in per_agent.values())
+        total_attempts  = sum(a["trade_attempts"]  for a in per_agent.values())
         return {
             "middleware_enabled":          self.use_middleware,
             "simulation_steps":            n_steps,
             "total_log_entries":           len(log),
+            "total_decisions":             total_decisions,
+            "total_trade_attempts":        total_attempts,
             "total_hallucinations":        total_hallucinations,
+            # Same denominator the per-agent rate uses -- these two were
+            # previously divided by different things (total vs active), so the
+            # headline and the per-agent numbers were not comparable.
             "overall_hallucination_rate_pct":
-                round(total_hallucinations / total_decisions * 100, 1),
+                (round(total_hallucinations / total_attempts * 100, 1)
+                 if total_attempts else None),
             "per_agent": summary,
         }
 
@@ -800,29 +1008,60 @@ class TradingReverie:
               f"{'ENABLED' if report.get('middleware_enabled') else 'DISABLED (baseline)'}")
         print(f"Steps simulated : {report['simulation_steps']}")
         print(f"Total decisions : {report['total_log_entries']}")
-        print(f"Total hallucinations : {report['total_hallucinations']}  "
-              f"({report['overall_hallucination_rate_pct']}% of all decisions)")
+        overall = report["overall_hallucination_rate_pct"]
+        if overall is None:
+            print(f"Total hallucinations : {report['total_hallucinations']}  "
+                  f"(rate N/A -- no agent ever requested a trade)")
+        else:
+            print(f"Total hallucinations : {report['total_hallucinations']}  "
+                  f"({overall}% of {report['total_trade_attempts']} trade attempts)")
         print()
         for name, ag in report["per_agent"].items():
             print(f"  {name}")
             print(f"    Decisions      : {ag['total_decisions']}  "
-                  f"(active={ag['active_decisions']})")
+                  f"(active={ag['active_decisions']}, "
+                  f"requested={ag['trade_attempts']})")
+            rate = ag["action_hallucination_rate_pct"]
+            rate_str = ("N/A (no trades requested)" if rate is None
+                        else f"{rate}% of {ag['trade_attempts']} attempts")
             print(f"    Action hallucinations : {ag['action_hallucinations']}  "
-                  f"({ag['action_hallucination_rate_pct']}% of active)")
+                  f"({rate_str})")
+            if ag["hallucination_kinds"]:
+                kinds = "  ".join(f"{k}={v}"
+                                  for k, v in sorted(ag["hallucination_kinds"].items()))
+                print(f"      by kind: {kinds}")
+            # Without this you cannot tell "the middleware improved the metrics"
+            # from "the middleware produced empty reasoning strings", since a
+            # fallback decision has reasoning="" and so scores clean on both
+            # the stale-context and persona-consistency checks for free.
+            print(f"    Parser fallbacks      : {ag['fallback_decisions']}  "
+                  f"({ag['fallback_rate_pct']}% of decisions)")
+            print(f"    Decisions w/ reasoning: {ag['reasoned_decisions']}  "
+                  f"(the only ones stale/drift can score)")
+            stale_pct = ag["stale_context_rate_pct"]
+            stale_str = ("N/A (no reasoning produced)" if stale_pct is None
+                         else f"{stale_pct}% of {ag['reasoned_decisions']} reasoned")
             print(f"    Stale context hits    : {ag['stale_context_hits']}  "
-                  f"({ag['stale_context_rate_pct']}% of decisions)")
+                  f"({stale_str})")
             avg_c = ag.get("avg_persona_consistency")
             drift_e = ag.get("persona_drift_events", 0)
+            scored = ag.get("scored_decisions", 0)
             avg_str = f"{avg_c:.2f}" if avg_c is not None else "n/a"
             print(f"    Persona consistency   : avg={avg_str}  "
-                  f"drift events={drift_e}")
+                  f"drift events={drift_e}  (scored {scored})")
             mc = ag.get("memory_compression", {})
             if mc.get("nodes_in"):
-                print(f"    Memory compression    : {mc['nodes_in']}→{mc['nodes_out']} nodes "
-                      f"(ratio={mc['compression_ratio']})")
-                print(f"      dropped: dup={mc['dropped_duplicate']} "
-                      f"stale={mc['dropped_stale']} budget={mc['dropped_budget']}  "
-                      f"annotated={mc['annotated_stale']}")
+                if report.get("middleware_enabled"):
+                    print(f"    Memory compression    : {mc['nodes_in']}→{mc['nodes_out']} nodes "
+                          f"(ratio={mc['compression_ratio']})")
+                    print(f"      dropped: dup={mc['dropped_duplicate']} "
+                          f"stale={mc['dropped_stale']} budget={mc['dropped_budget']}  "
+                          f"annotated={mc['annotated_stale']}")
+                else:
+                    print(f"    Memory context        : {mc['nodes_in']} nodes "
+                          f"(uncompressed)")
+                print(f"      avg prompt context    : "
+                      f"{mc['avg_context_chars']:,} chars/decision")
             dist = ag["action_distribution"]
             print(f"    Actions        : buy={dist.get('buy',0)}  "
                   f"sell={dist.get('sell',0)}  hold={dist.get('hold',0)}  "
@@ -872,6 +1111,11 @@ def main():
                         help="Name for the new simulation run")
     parser.add_argument("--steps", type=int, default=120,
                         help="Number of market steps to simulate")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Delete an existing --sim folder and re-fork it. "
+                             "Without this, reusing a --sim name is refused: "
+                             "resuming carries persona positions into a "
+                             "step-0 market and makes arms incomparable.")
     parser.add_argument("--no-middleware", action="store_true",
                         help="Baseline arm: disable memory compression, ID-RAG "
                              "anchoring and the action-filtering legal-action "
@@ -881,7 +1125,8 @@ def main():
     args = parser.parse_args()
 
     sim = TradingReverie(args.sim, args.fork,
-                         use_middleware=not args.no_middleware)
+                         use_middleware=not args.no_middleware,
+                         fresh=args.fresh)
     sim.run(args.steps)
 
 

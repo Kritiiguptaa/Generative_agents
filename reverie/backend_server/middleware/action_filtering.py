@@ -55,7 +55,15 @@ def get_legal_actions(agent_state, market_state) -> List[Action]:
 	# HOLD is always legal
 	legal.append(Action("HOLD", None, 0, "always available"))
 
-	# Market closed -> only HOLD
+	# ANALYZE is always legal -- a no-op "gather information, trade nothing"
+	# action. The baseline arm's free-form prompt has always offered it, so
+	# omitting it here gave the two arms different action vocabularies and made
+	# their action distributions incomparable (baseline analyze=200 vs
+	# middleware hold=200 was partly a prompt difference, not a behaviour one).
+	# Legal even when the market is closed -- reading the tape needs no venue.
+	legal.append(Action("ANALYZE", None, 0, "always available"))
+
+	# Market closed -> only the no-op actions
 	if not _market_is_open(market_state):
 		return legal
 
@@ -101,6 +109,8 @@ def _format_legal_actions(legal_actions: List[Action]) -> str:
 	for action in legal_actions:
 		if action.type == "HOLD":
 			lines.append("- HOLD")
+		elif action.type == "ANALYZE":
+			lines.append("- ANALYZE (study the market, place no trade)")
 		elif action.type == "BUY":
 			lines.append(f"- BUY {action.symbol} (max {action.quantity} shares)")
 		elif action.type == "SELL":
@@ -146,7 +156,7 @@ You MUST choose from ONLY these actions:
 {action_str}
 
 Respond ONLY in this JSON format:
-{{"action": "BUY/SELL/HOLD", "symbol": "TICKER or null", "quantity": number, "reasoning": "why"}}
+{{"action": "BUY/SELL/HOLD/ANALYZE", "symbol": "TICKER or null", "quantity": number, "reasoning": "why"}}
 """
 	return prompt, legal_actions
 
@@ -207,6 +217,76 @@ def _split_combined_action(action_raw: object) -> Tuple[Optional[str], Optional[
 	return parts[0], (parts[1] if len(parts) > 1 else None)
 
 
+# Validation failures that mean "the model asked for a trade it was not allowed
+# to make" -- i.e. an action hallucination. Everything else validate_response
+# can return is a small-model *formatting* failure (bad JSON, a float where an
+# int was wanted) and must NOT be counted as a hallucination, or the headline
+# metric just measures how badly phi3 formats JSON.
+ILLEGAL_ACTION_ERRORS = frozenset({
+	"action type is invalid",
+	"HOLD was not in legal list",
+	"action/symbol not in legal list",
+	"quantity outside legal limit",
+})
+
+
+def is_illegal_action_error(error: Optional[str]) -> bool:
+	"""True if `error` from validate_response() denotes an illegal trade request."""
+	return error in ILLEGAL_ACTION_ERRORS
+
+
+def describe_request(response_text: str) -> Dict[str, object]:
+	"""
+	Best-effort extraction of what the model *asked for*, independent of whether
+	the request validated. This is the raw pre-filter request, which is the only
+	place an action hallucination is observable in the middleware arm -- once
+	run_action_filtering_step() has done its job the illegal action is gone.
+	"""
+	response, _error = _parse_json_response(response_text)
+	if response is None:
+		return {"action": None, "symbol": None, "quantity": None}
+	action_type, symbol_hint = _split_combined_action(response.get("action"))
+	symbol = response.get("symbol") or response.get("ticker") or symbol_hint
+	if isinstance(symbol, str):
+		symbol = symbol.strip().upper()
+		if symbol in ("NULL", "NONE", ""):
+			symbol = None
+	return {
+		"action": action_type.lower() if action_type else None,
+		"symbol": symbol,
+		"quantity": response.get("quantity"),
+	}
+
+
+def coerce_quantity(raw: object) -> Optional[int]:
+	"""
+	Normalise a model-supplied quantity to an int, or None if it isn't numeric.
+
+	Small instruct models emit 10, "10" and 10.0 interchangeably. The baseline
+	arm already coerced all three via int(); this arm used to demand a real int
+	and reject the rest, which burned a retry and usually ended as a fallback
+	HOLD. That made part of the filtered arm's do-nothing rate an artifact of
+	parser strictness rather than a difference in decision quality -- the exact
+	thing _split_combined_action's docstring argues against. Both arms now share
+	this one definition.
+
+	bool is rejected explicitly: isinstance(True, int) is True in Python, so
+	{"quantity": true} would otherwise sail through as a 1-share order.
+	"""
+	if isinstance(raw, bool):
+		return None
+	if isinstance(raw, int):
+		return raw
+	if isinstance(raw, float):
+		return int(raw)
+	if isinstance(raw, str):
+		try:
+			return int(float(raw.strip().replace(",", "")))
+		except (TypeError, ValueError):
+			return None
+	return None
+
+
 def validate_response(
 	response_text: str, legal_actions: List[Action]
 ) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
@@ -232,29 +312,35 @@ def validate_response(
 			symbol = None
 	quantity = response.get("quantity")
 
-	if action_type not in {"BUY", "SELL", "HOLD"}:
+	if action_type not in {"BUY", "SELL", "HOLD", "ANALYZE"}:
 		return None, "action type is invalid"
 
 	legal_map = {(a.type, a.symbol): a.quantity for a in legal_actions}
 
-	if action_type == "HOLD":
-		if ("HOLD", None) not in legal_map:
+	if action_type in ("HOLD", "ANALYZE"):
+		if (action_type, None) not in legal_map:
 			return None, "HOLD was not in legal list"
-		if quantity not in (0, None):
-			return None, "HOLD quantity must be 0"
+		# A no-op action carrying a quantity is a formatting slip, not an
+		# illegal trade -- neither HOLD nor ANALYZE moves any shares, so
+		# normalise the quantity to 0 rather than rejecting the whole response
+		# and burning a retry (which previously ended as a fallback HOLD and
+		# inflated this arm's do-nothing rate).
 		# Normalise exactly like the buy/sell path below does. Without this the
 		# action stays whatever case the model produced ("HOLD"), and
 		# execute_trading_action()'s `action in ("hold", "analyze")` check
 		# misses it, sending a plain hold down the trade-execution path.
-		response["action"] = "hold"
+		response["action"] = action_type.lower()
 		response["symbol"] = symbol
 		response["quantity"] = 0
+		if "reasoning" not in response:
+			response["reasoning"] = ""
 		return response, None
 
 	if (action_type, symbol) not in legal_map:
 		return None, "action/symbol not in legal list"
 
-	if not isinstance(quantity, int):
+	quantity = coerce_quantity(quantity)
+	if quantity is None:
 		return None, "quantity must be an integer"
 
 	max_qty = legal_map[(action_type, symbol)]
@@ -305,21 +391,46 @@ def run_action_filtering_step(
 	memory_context: str,
 	llm_call: Callable[[str], str],
 	log_path: str,
-) -> Dict[str, object]:
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+	"""
+	Returns (decision, stats).
+
+	`stats` exists because this function is the *only* place the middleware
+	arm's action hallucinations are observable. By the time the decision reaches
+	execute_trading_action() every illegal request has already been rejected and
+	replaced with a legal one, so a detector sitting downstream of this function
+	can only ever report zero. stats keys:
+
+	  status          "success" | "retry" | "fallback"
+	  illegal_request True if the model's FIRST attempt asked for an illegal
+	                  trade (as opposed to merely emitting malformed JSON)
+	  error_reason    the first attempt's validation error, if any
+	  requested       what the first attempt actually asked for
+	"""
 	prompt, legal_actions = build_prompt(agent_state, market_state, memory_context)
 
 	response_text = llm_call(prompt)
 	response, error = validate_response(response_text, legal_actions)
+
+	# Capture the pre-filter request before any correction happens.
+	stats: Dict[str, object] = {
+		"status": "success",
+		"illegal_request": is_illegal_action_error(error),
+		"error_reason": error or "",
+		"requested": describe_request(response_text),
+	}
+
 	if response is not None:
 		log_action(log_path, _get_agent_name(agent_state), response, "success")
-		return response
+		return response, stats
 
 	retry_prompt = prompt + f"\n\nValidation error: {error}. Try again."
 	retry_text = llm_call(retry_prompt)
 	retry_response, retry_error = validate_response(retry_text, legal_actions)
 	if retry_response is not None:
 		log_action(log_path, _get_agent_name(agent_state), retry_response, "retry", error)
-		return retry_response
+		stats["status"] = "retry"
+		return retry_response, stats
 
 	fallback = {"action": "hold", "symbol": None, "quantity": 0, "reasoning": ""}
 	log_action(
@@ -329,4 +440,7 @@ def run_action_filtering_step(
 		"fallback",
 		retry_error or "validation failed twice",
 	)
-	return fallback
+	stats["status"] = "fallback"
+	# A second illegal attempt still counts, even if the first was just malformed.
+	stats["illegal_request"] = bool(stats["illegal_request"]) or is_illegal_action_error(retry_error)
+	return fallback, stats
