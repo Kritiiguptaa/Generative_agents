@@ -3,9 +3,12 @@
 Working log of what was changed, what was deliberately left alone, and what is
 still open. Written for the trading-sim work on branch `armaans-frontend`.
 
-**Status as of the latest entry:** Tier 1 and Tier 2 are committed and pushed
-(`8ad0fe2`). Tier 3 is untouched. A further round of findings (section 6) is
-diagnosed but not fixed.
+**Status as of the latest entry:** Tier 1 and Tier 2 are committed (`8ad0fe2`).
+Run 02 executed on the DGX and analysed — results in section 10. Three fixes
+from that analysis are committed (section 11). Tier 3 is still untouched.
+
+**Read section 10 first if you are catching up** — it contains measured results
+that refute two of the hypotheses in section 6.
 
 ---
 
@@ -300,7 +303,14 @@ Found while the GPU run was in progress. These do not affect whether the metrics
 *can* observe anything (Tier 1/2 fixed that). They affect whether what they
 observe **means what it appears to mean**.
 
-### 6.1 Temperature 0 — likely explains `analyze=200`
+### 6.1 Temperature 0 — ~~likely explains `analyze=200`~~ **REFUTED by run 02**
+
+> **This hypothesis was wrong.** Run 02 produced 71–122 *distinct* reasoning
+> strings per agent out of 200 decisions. The model reasons freshly each step
+> and independently concludes "wait" every time. Temperature is not the cause.
+> The real cause is in section 10.2. The description below is kept for the
+> record; the setting is still `temperature=0` and arguably still worth
+> raising, but it is not what produced the all-`analyze` run.
 
 `ollama_request` defaults to `temperature=0` (`gpt_structure.py:55`) and the
 trading call does not override it (`trading_reverie.py:149`). That is greedy
@@ -315,6 +325,10 @@ The agents are not making 200 decisions. They are making one and echoing it.
 hypothesis, not proven.*
 
 ### 6.2 `"OLLAMA ERROR"` makes infrastructure failure look like model failure
+
+> **Did not occur in run 02** — 0 `OLLAMA ERROR` lines and 0 parser fallbacks in
+> both arms, so the server was healthy and this did not distort those results.
+> The design flaw is real and still unfixed; it just wasn't a factor this time.
 
 Every failure path in `ollama_request` — connection refused, timeout, model not
 pulled, HTTP error — returns the **string** `"OLLAMA ERROR"`. Downstream that
@@ -427,19 +441,196 @@ loop rather than once.
 
 ## 8. Suggested order from here
 
-1. **6.1 (temperature) and 6.2 (error sentinel)** — few lines each, and both
-   change what the numbers mean. Without 6.1 you are measuring one decision per
-   agent; without 6.2 the fallback rate is untrustworthy.
-2. **Tier 3 item 3** (compression failing silently) — cheap, and it protects the
-   interpretation of the run.
-3. **6.3 and 6.4** — before writing anything up. A stale-context metric that
-   fires on the word "supply" is not defensible, and a silently failing planner
-   makes the agents less distinct than they look.
-4. Remaining Tier 3, then 6.5–6.7.
+*(Revised after run 02. The original list led with 6.1, which run 02 refuted.)*
+
+1. **Re-run both arms** with the section 11 fixes. Those three changes are
+   behavioural and their effect is unmeasurable without a real run. Until agents
+   actually trade, the hallucination metric still has nothing to observe.
+2. **6.4 (daily planner)** — still unconfirmed and still silently swallowing its
+   own failure. Cheap to fix, and it feeds the retrieval focal points.
+3. **Tier 3 item 3** (compression failing silently) — cheap, protects the
+   interpretation of the next run.
+4. **6.3 (stale-context detector)** — before writing anything up. Run 02 showed
+   this metric moving (70% → 37.5%, 69% → 24%), which makes it tempting to
+   quote. It is a word search for "supply"/"deliveries" and cannot tell a
+   correct citation from a stale one. Do not publish it as-is.
+5. **6.2 (error sentinel)** — did not bite run 02, but the next run may not be
+   as lucky.
+6. **10.7** (reflection truncation), then remaining Tier 3, then 6.5–6.7.
 
 ---
 
-## 9. Run commands
+## 10. Run 02 results — what the data actually showed
+
+Two 200-step runs on the DGX (`run_mw_02`, `run_base_02`), analysed from the
+reports, filter logs and stdout logs.
+
+### 10.1 Headline
+
+Both arms: **600 decisions, 100% `analyze`, 0 trade attempts, 0 parser
+fallbacks, 0 Ollama errors, 200/200 decisions with real reasoning.**
+
+The pipeline was healthy. Nothing failed. The model simply chose to do nothing,
+600 times out of 600.
+
+Note this is a *different* zero from the original bug. The metric now correctly
+reports `N/A` — "no agent ever requested a trade" — instead of printing `0.0%`
+for a 0/0. That part worked as designed.
+
+### 10.2 Root cause: `currently` is frozen at "about to enter"
+
+Every persona's bootstrap `currently` describes the agent as pre-entry, and the
+model restated it back nearly verbatim:
+
+| persona `currently` | model's most frequent reasoning |
+|---|---|
+| Alex: "wants confirmation of supply tightening **before entering**" | "Wait for confirmation of supply tightening in NVDA before considering AMD" (×17) |
+| Marcus: "watching for a **dip entry**… buy $5,000 on any pullback" | "Wait for a dip in NVDA price to enter with a minimum investment of $5,000" (×17) |
+| Sara: "considering adding 50 more **if price holds above $191**" | "Wait for the NVDA price to hold above $191 before considering adding 50 more" (×10) |
+
+`scratch.currently` is **never written** by the trading loop. The only writer in
+the codebase is `plan.py:464` (`revise_identity`), which belongs to the village
+simulation. The trading sim uses `trading_daily_plan.ensure_daily_plan()`
+instead and never touches the field.
+
+**The stated conditions were objectively met and ignored:**
+
+```
+Sara needs NVDA > $191     ->  272/272 observations qualified (100% of the run)
+Marcus needs a dip         ->  122 down-ticks occurred
+Alex needs supply news     ->  fired at step 30 and again at step 50
+```
+
+A static intention keeps an agent permanently pre-entry, because no prompt ever
+tells it the condition has been satisfied.
+
+### 10.3 The `ANALYZE` addition was a regression
+
+Adding `ANALYZE` to the filtered arm for symmetry (section 1.4) removed the only
+trades that were happening:
+
+| | before (`8ad0fe2^`) | after |
+|---|---|---|
+| middleware arm | hold 200/195/189, **16 trades** | analyze 200/200/200, **0 trades** |
+
+The risk was flagged when the change was made; run 02 confirmed it. `ANALYZE` is
+a free escape hatch — a model can always justify gathering more information, so
+an agent offered it never has to commit. Fixed in section 11.1 by removing it
+from **both** arms rather than adding it to both.
+
+### 10.4 New bug: scripted news price shocks were erased after one tick
+
+`HistoricalMarketEnvironment.tick()` overwrote `current_prices[symbol]` with
+`series[idx]` at the top of every tick, discarding the previous step's news
+impact. The large moves in the logs were the *snap-backs*, not the news:
+
+```
+TSLA rises 7.6% to $383.11    <- reversion of the step-15 -7% recall
+TSLA falls 8.40% to $381.88   <- reversion of the step-40 +9% deliveries beat
+```
+
+The entire contradictory-news design — the premise of the experiment — had price
+impacts lasting exactly one step. Fixed in section 11.3.
+
+### 10.5 The market was nearly flat
+
+```
+NVDA   $199.38 – $201.10   (0.86% range over the whole run)
+TSLA   $380.59 – $384.05   (0.91%)
+AMD    $511.72 – $524.76   (2.5%)
+```
+
+200 steps × 60s = 200 minutes of 1-minute bars. Combined with 10.4, there was
+very little for a willing agent to react to. The 11.3 fix substantially changes
+this, since news shocks now persist and compound.
+
+### 10.6 What worked
+
+- **Memory compression:** 8,691 → 1,562 nodes (Alex); average prompt context
+  5,159 → 782 chars. Stale-context hits fell for Marcus (70% → 37.5%) and Sara
+  (69% → 24%).
+- **The fresh-state guard (1.3):** PnL was byte-identical across arms
+  (−212 / 0 / −106), confirming both runs started from the same state against
+  the same deterministic market. That comparison was impossible before.
+- **Alex's stale rate was 75% in *both* arms** — his reasoning fixates on the
+  word "supply" regardless of how much context is removed. That is finding 6.3
+  visible in the data.
+
+### 10.7 Also observed, not yet fixed
+
+82 reflection insight calls truncated at `num_predict=150` and 30 more at
+`num_predict=30` (`generate_insights_and_evidence`). Incomplete thoughts are
+being written into associative memory. Not in the decision path
+(`max_tokens=300`), so it did not affect the decisions directly.
+
+---
+
+## 11. Fixes from the run 02 analysis
+
+### 11.1 `ANALYZE` removed from both arms
+
+**Files:** `middleware/action_filtering.py`, `trading_reverie.py`
+
+Removed from `get_legal_actions`, both prompt templates, and the JSON format
+hints. `HOLD` already expresses "no trade this step" without implying a deferred
+decision.
+
+A model that emits `ANALYZE` anyway is **normalised to `HOLD`** rather than
+rejected, in both arms — it is expressing "no trade", not an illegal trade, and
+rejecting it would burn a retry and inflate the fallback rate with a decision
+that was semantically fine.
+
+### 11.2 `currently` is rebuilt from live state every step
+
+**File:** `trading_reverie.py` — new `refresh_currently()`, called from
+`_step_agent` (after perceive, before anything reads the field) and from
+`__init__` (before the first daily plan is generated).
+
+`currently` now carries facts, not intent:
+
+```
+before: "Marcus has $25,000 in cash and no open positions. He is watching
+         TSLA and NVDA for a dip entry."
+after:  "Marcus Webb has $25,000 in cash and holds 10 NVDA at avg $180.00
+         (now $200.00, +11.1%). Total portfolio value $27,000. Maximum value
+         for a single trade is $5,400."
+```
+
+Persona differentiation is unaffected — it lives in `trading_strategy`,
+`innate` and `learned`, which are stable traits rather than a status that goes
+stale.
+
+### 11.3 Scripted news impacts now persist
+
+**File:** `historical_market_environment.py`
+
+New `_news_multiplier` per symbol. The replayed bar is multiplied by the
+accumulated news factor, so the real price path is preserved *and* the shock
+survives, compounding as later headlines for the same symbol arrive.
+
+Verified — TSLA now traces the intended narrative arc, each level holding:
+
+```
+step 15 (-7% recall)            383.45 -> 355.92, holds at ~356
+step 40 (+9% deliveries beat)   354.66 -> 387.71, holds at ~387
+step 80 (-5% Musk sells)        395.79 -> 375.34, holds at ~375
+```
+
+Reversion on the tick after the +9% headline: **8.4% before → 0.15% after**.
+
+### 11.4 Verification
+
+77 existing tests still pass. Fix-specific checks cover: `ANALYZE` absent from
+the legal set and both prompts, `ANALYZE`→`HOLD` normalisation, `currently`
+containing no intent language and correct mark-to-market, and news shocks
+persisting across all three TSLA headlines.
+
+Still untested: the LLM path (Ollama unreachable locally). **11.1 and 11.2 are
+behavioural changes whose effect can only be measured by a real run.**
+
+---
+
+## 12. Run commands
 
 ```bash
 # DGX

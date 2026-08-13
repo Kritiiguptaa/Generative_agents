@@ -55,6 +55,21 @@ class HistoricalMarketEnvironment(MarketEnvironment):
         self._bar_index = 0
         self.is_open = True
 
+        # Cumulative multiplier applied to the replayed series, one per symbol.
+        #
+        # Scripted news used to write straight into current_prices, which the
+        # next tick immediately overwrote with series[idx] -- so a +9% headline
+        # moved the price for exactly one step and then snapped back. The logs
+        # show the snap-backs rather than the news: a step-40 "+9% deliveries
+        # beat" appeared as "TSLA falls 8.40%" on step 41. Every news impact in
+        # the contradictory-news calendar was being erased one tick after it
+        # fired, which defeats the entire premise of the experiment.
+        #
+        # Holding the impact here instead means the replayed real price path is
+        # preserved *and* the news shock persists, compounding as later
+        # headlines for the same symbol arrive.
+        self._news_multiplier = {s: 1.0 for s in self.SYMBOLS}
+
         # Start the sim at the real session's opening prices instead of the
         # synthetic BASE_PRICES.
         for symbol in self.SYMBOLS:
@@ -75,7 +90,12 @@ class HistoricalMarketEnvironment(MarketEnvironment):
             for symbol in self.SYMBOLS:
                 series = self.historical_prices.get(symbol, [])
                 old = self.current_prices[symbol]
-                new = series[idx] if idx < len(series) else old
+                # Replay the real bar, but keep any accumulated news shock
+                # applied on top of it rather than discarding it.
+                if idx < len(series):
+                    new = round(series[idx] * self._news_multiplier[symbol], 2)
+                else:
+                    new = old
                 self.current_prices[symbol] = new
                 self.price_history[symbol].append(new)
 
@@ -95,19 +115,18 @@ class HistoricalMarketEnvironment(MarketEnvironment):
             for symbol in self.SYMBOLS:
                 self.price_history[symbol].append(self.current_prices[symbol])
 
-        # 2. Scripted news (same overlay logic as MarketEnvironment.tick)
+        # 2. Scripted news. The impact is recorded in _news_multiplier so it
+        #    survives the next tick's replay (see __init__), not just written
+        #    into current_prices where the replay would overwrite it.
         if self.step in self.SCRIPTED_NEWS:
             symbol, headline, impact = self.SCRIPTED_NEWS[self.step]
-            if symbol:
-                old = self.current_prices[symbol]
+            affected = [symbol] if symbol else list(self.SYMBOLS)
+            for sym in affected:
+                self._news_multiplier[sym] *= (1.0 + impact)
+                old = self.current_prices[sym]
                 new = max(1.0, round(old * (1.0 + impact), 2))
-                self.current_prices[symbol] = new
-                self.price_history[symbol][-1] = new
-            else:
-                for sym in self.SYMBOLS:
-                    old = self.current_prices[sym]
-                    self.current_prices[sym] = max(1.0, round(old * (1.0 + impact), 2))
-                    self.price_history[sym][-1] = self.current_prices[sym]
+                self.current_prices[sym] = new
+                self.price_history[sym][-1] = new
 
             events.append(MarketEvent(
                 event_type="news",

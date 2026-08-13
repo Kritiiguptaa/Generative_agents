@@ -55,15 +55,23 @@ def get_legal_actions(agent_state, market_state) -> List[Action]:
 	# HOLD is always legal
 	legal.append(Action("HOLD", None, 0, "always available"))
 
-	# ANALYZE is always legal -- a no-op "gather information, trade nothing"
-	# action. The baseline arm's free-form prompt has always offered it, so
-	# omitting it here gave the two arms different action vocabularies and made
-	# their action distributions incomparable (baseline analyze=200 vs
-	# middleware hold=200 was partly a prompt difference, not a behaviour one).
-	# Legal even when the market is closed -- reading the tape needs no venue.
-	legal.append(Action("ANALYZE", None, 0, "always available"))
+	# NOTE: ANALYZE is deliberately NOT offered.
+	#
+	# It was added here briefly so both arms shared one action vocabulary, and
+	# the measured result was unambiguous: every agent in both arms chose
+	# ANALYZE on 100% of 600 decisions and placed zero trades. The arm that had
+	# previously placed 16 trades placed none once it had the option.
+	#
+	# ANALYZE is a free escape hatch. A model can always justify gathering more
+	# information, so an agent offered it never has to commit -- and an agent
+	# that never commits cannot produce an action hallucination, which leaves
+	# the metric with nothing to measure. HOLD already expresses "do nothing
+	# this step" without implying a deferred decision.
+	#
+	# Both arms are kept symmetric by removing it from BOTH prompts rather than
+	# adding it to both. See free_form_decision() in trading_reverie.py.
 
-	# Market closed -> only the no-op actions
+	# Market closed -> only HOLD
 	if not _market_is_open(market_state):
 		return legal
 
@@ -108,9 +116,7 @@ def _format_legal_actions(legal_actions: List[Action]) -> str:
 	lines: List[str] = []
 	for action in legal_actions:
 		if action.type == "HOLD":
-			lines.append("- HOLD")
-		elif action.type == "ANALYZE":
-			lines.append("- ANALYZE (study the market, place no trade)")
+			lines.append("- HOLD (place no trade this step)")
 		elif action.type == "BUY":
 			lines.append(f"- BUY {action.symbol} (max {action.quantity} shares)")
 		elif action.type == "SELL":
@@ -156,7 +162,7 @@ You MUST choose from ONLY these actions:
 {action_str}
 
 Respond ONLY in this JSON format:
-{{"action": "BUY/SELL/HOLD/ANALYZE", "symbol": "TICKER or null", "quantity": number, "reasoning": "why"}}
+{{"action": "BUY/SELL/HOLD", "symbol": "TICKER or null", "quantity": number, "reasoning": "why"}}
 """
 	return prompt, legal_actions
 
@@ -312,13 +318,21 @@ def validate_response(
 			symbol = None
 	quantity = response.get("quantity")
 
-	if action_type not in {"BUY", "SELL", "HOLD", "ANALYZE"}:
+	# ANALYZE is accepted at the parser and normalised to HOLD rather than
+	# rejected. It is not offered in the prompt (see get_legal_actions), but a
+	# model that emits it anyway is expressing "no trade", not an illegal trade
+	# -- rejecting it would burn a retry and inflate the fallback rate with a
+	# decision that was semantically fine.
+	if action_type == "ANALYZE":
+		action_type = "HOLD"
+
+	if action_type not in {"BUY", "SELL", "HOLD"}:
 		return None, "action type is invalid"
 
 	legal_map = {(a.type, a.symbol): a.quantity for a in legal_actions}
 
-	if action_type in ("HOLD", "ANALYZE"):
-		if (action_type, None) not in legal_map:
+	if action_type == "HOLD":
+		if ("HOLD", None) not in legal_map:
 			return None, "HOLD was not in legal list"
 		# A no-op action carrying a quantity is a formatting slip, not an
 		# illegal trade -- neither HOLD nor ANALYZE moves any shares, so

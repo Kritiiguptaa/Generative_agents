@@ -244,9 +244,9 @@ Market:
 Memory:
 {memory_context}
 
-Decide your next action: buy, sell, hold, or analyze.
+Decide your next action: buy, sell, or hold.
 Respond ONLY in this JSON format:
-{{"action": "buy/sell/hold/analyze", "symbol": "TICKER or null", "quantity": number, "reasoning": "why"}}
+{{"action": "buy/sell/hold", "symbol": "TICKER or null", "quantity": number, "reasoning": "why"}}
 """
 
     name = s.name
@@ -270,7 +270,11 @@ Respond ONLY in this JSON format:
     if action_type is None:
         return _fail("missing action")
     action = action_type.lower()
-    if action not in ("buy", "sell", "hold", "analyze"):
+    # Same normalisation the filtered arm applies: ANALYZE is not offered, but
+    # if the model emits it anyway that means "no trade", not an illegal one.
+    if action == "analyze":
+        action = "hold"
+    if action not in ("buy", "sell", "hold"):
         return _fail(f"unknown action {action!r}")
 
     symbol = response.get("symbol")
@@ -300,6 +304,60 @@ Respond ONLY in this JSON format:
     log_action(action_log_path, name, decision, "success")
     stats["requested"] = {"action": action, "symbol": symbol, "quantity": quantity}
     return decision, stats
+
+
+# ===========================================================================
+# Live agent state
+# ===========================================================================
+
+def refresh_currently(persona: TradingPersona, market: MarketEnvironment) -> str:
+    """
+    Rewrite scratch.currently from the agent's ACTUAL portfolio state.
+
+    The bootstrap `currently` strings describe every agent as poised to enter a
+    position but not yet in one -- "wants confirmation of supply tightening
+    before entering", "watching for a dip entry", "considering adding 50 more
+    shares if price holds above $191". Nothing in the simulation ever updated
+    the field: the only writer is plan.py's revise_identity(), which belongs to
+    the village sim and is never called from the trading loop. So the text the
+    agent read at step 199 was the text it read at step 0.
+
+    Measured consequence: all three agents restated their own `currently` text
+    back as reasoning and chose not to trade on 600/600 decisions, even though
+    their stated conditions were satisfied -- Sara's "price holds above $191"
+    was true on 272 of 272 observations, and Marcus saw 122 down-ticks while
+    waiting for "a dip". A static intention keeps an agent permanently
+    pre-entry because no prompt ever tells it the condition has been met.
+
+    `currently` now carries facts (cash, holdings, mark-to-market, headroom).
+    Intent still lives in trading_strategy / innate / learned, which is where
+    persona differentiation belongs -- those are stable traits, not a status
+    that goes stale.
+    """
+    s = persona.scratch
+    prices = market.current_prices
+    pv = persona.portfolio_value(prices)
+
+    if s.positions:
+        holdings = []
+        for sym, pos in s.positions.items():
+            px = prices.get(sym, pos["avg_price"])
+            avg = pos["avg_price"] or px
+            pnl_pct = ((px - avg) / avg * 100.0) if avg else 0.0
+            holdings.append(f"{pos['qty']} {sym} at avg ${avg:.2f} "
+                            f"(now ${px:.2f}, {pnl_pct:+.1f}%)")
+        holdings_str = "holds " + "; ".join(holdings)
+    else:
+        holdings_str = "holds no open positions"
+
+    max_trade = pv * float(getattr(s, "risk_limit_per_trade", 0.05) or 0.05)
+
+    s.currently = (
+        f"{s.name} has ${s.cash_balance:,.0f} in cash and {holdings_str}. "
+        f"Total portfolio value ${pv:,.0f}. "
+        f"Maximum value for a single trade is ${max_trade:,.0f}."
+    )
+    return s.currently
 
 
 # ===========================================================================
@@ -576,8 +634,12 @@ class TradingReverie:
                     p.s_mem.add_known_agent(other)
             self.personas[name] = p
 
-        # Initialize daily plans for each agent
+        # Initialize daily plans for each agent. Refresh `currently` first --
+        # generate_daily_plan() feeds it into the planning prompt, so the plan
+        # would otherwise be built from the stale bootstrap "waiting to enter"
+        # text this run is trying to get rid of.
         for persona in self.personas.values():
+            refresh_currently(persona, self.market)
             ensure_daily_plan(persona, self.market, force=True)
 
         print(f"[TradingReverie] Middleware: "
@@ -695,6 +757,11 @@ class TradingReverie:
 
         # 2. Perceive
         market_perceive(persona, self.market, events)
+
+        # 2b. Refresh the agent's self-description from live portfolio state,
+        # before anything reads scratch.currently (the decision prompt in both
+        # arms, the ID-RAG graph update below, and the daily planner all do).
+        refresh_currently(persona, self.market)
 
         # 3. Reflect (compresses memory when budget exhausted)
         # Capture thought count before reflect so we can detect new insights.
