@@ -50,7 +50,7 @@ Rules:
 - Use plain ASCII.
 """
 
-    raw = ollama_request(prompt, max_tokens=220, stop=["\n\n"], timeout=180)
+    raw = ollama_request(prompt, max_tokens=400, stop=["\n\n"], timeout=180)
     try:
         cleaned = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
         data = json.loads(cleaned)
