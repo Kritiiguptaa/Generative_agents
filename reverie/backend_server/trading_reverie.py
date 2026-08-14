@@ -66,7 +66,8 @@ def _quiet_reflection_trigger(persona):
         builtins.print = _real_print
     return result
 _reflect_mod.reflection_trigger = _quiet_reflection_trigger
-from market_perceive    import market_perceive, record_trade_fill
+from market_perceive    import (market_perceive, record_trade_fill,
+                                record_order_feedback)
 from trading_persona    import TradingPersona
 from trading_daily_plan import ensure_daily_plan, apply_interaction_to_plan, current_focus_str
 from trading_interactions import maybe_interaction
@@ -101,6 +102,55 @@ from utils import fs_storage
 # LLM Decision
 # ===========================================================================
 
+def build_memory_context(retrieved: dict,
+                         persona: TradingPersona,
+                         market:  MarketEnvironment,
+                         use_middleware: bool = True):
+    """
+    Turn new_retrieve() output into the memory block the prompt carries.
+
+    Split out of make_trading_decision() so paired_eval.py can build BOTH arms'
+    contexts from one retrieval result without also invoking a decision.
+
+    Returns (memory_context, compression_stats).
+    """
+    if use_middleware:
+        # Middleware layer: compress the retrieval output before it reaches the
+        # LLM. Replaces the old arbitrary nodes[:6] truncation.
+        memory_context, mc_stats = compress_memories(retrieved, persona, market)
+
+        # ID-RAG: retrieve only the identity facts relevant to this context
+        # and prepend them. Replaces the static full-block anchor.
+        memory_context = id_rag_anchor(persona, memory_context)
+        return memory_context, mc_stats
+
+    # Baseline: hand the LLM everything new_retrieve() returned, verbatim.
+    # No dedup, no supersession pruning, no budget -- this is the raw
+    # context the middleware exists to clean up.
+    raw_nodes = []
+    for nodes in retrieved.values():
+        raw_nodes.extend(nodes)
+    memory_context = "\n".join(n.description for n in raw_nodes)
+    # Report the size of the context even though nothing compressed it. This
+    # arm was observed choosing "analyze" on 100% of decisions, and the
+    # leading hypothesis is that the uncompressed block is large enough to
+    # crowd out the instruction -- untestable while the stats said only
+    # {"enabled": False}. nodes_out == nodes_in because nothing was dropped.
+    mc_stats = {
+        "enabled":           False,
+        "nodes_in":          len(raw_nodes),
+        "nodes_out":         len(raw_nodes),
+        "dropped_duplicate": 0,
+        "dropped_stale":     0,
+        "dropped_budget":    0,
+        "annotated_stale":   0,
+        "compression_ratio": 1.0,
+        "chars_in":          len(memory_context),
+        "chars_out":         len(memory_context),
+    }
+    return memory_context, mc_stats
+
+
 def make_trading_decision(persona: TradingPersona,
                           market:  MarketEnvironment,
                           retrieved: dict,
@@ -125,39 +175,8 @@ def make_trading_decision(persona: TradingPersona,
       downstream code (execute_trading_action, _check_stale_reasoning,
       score_persona_consistency, _generate_report).
     """
-    if use_middleware:
-        # Middleware layer: compress the retrieval output before it reaches the
-        # LLM. Replaces the old arbitrary nodes[:6] truncation.
-        memory_context, mc_stats = compress_memories(retrieved, persona, market)
-
-        # ID-RAG: retrieve only the identity facts relevant to this context
-        # and prepend them. Replaces the static full-block anchor.
-        memory_context = id_rag_anchor(persona, memory_context)
-    else:
-        # Baseline: hand the LLM everything new_retrieve() returned, verbatim.
-        # No dedup, no supersession pruning, no budget -- this is the raw
-        # context the middleware exists to clean up.
-        raw_nodes = []
-        for nodes in retrieved.values():
-            raw_nodes.extend(nodes)
-        memory_context = "\n".join(n.description for n in raw_nodes)
-        # Report the size of the context even though nothing compressed it. This
-        # arm was observed choosing "analyze" on 100% of decisions, and the
-        # leading hypothesis is that the uncompressed block is large enough to
-        # crowd out the instruction -- untestable while the stats said only
-        # {"enabled": False}. nodes_out == nodes_in because nothing was dropped.
-        mc_stats = {
-            "enabled":           False,
-            "nodes_in":          len(raw_nodes),
-            "nodes_out":         len(raw_nodes),
-            "dropped_duplicate": 0,
-            "dropped_stale":     0,
-            "dropped_budget":    0,
-            "annotated_stale":   0,
-            "compression_ratio": 1.0,
-            "chars_in":          len(memory_context),
-            "chars_out":         len(memory_context),
-        }
+    memory_context, mc_stats = build_memory_context(
+        retrieved, persona, market, use_middleware)
 
     def _call_llm(prompt: str) -> str:
         # format="json": grammar-constrained decoding. phi3:mini otherwise
@@ -244,6 +263,11 @@ Market:
 Memory:
 {memory_context}
 
+Rules:
+- You cannot borrow money or trade on margin. A purchase's total cost
+  (price x quantity) must not exceed your cash.
+- You cannot sell shares you do not hold.
+
 Decide your next action: buy, sell, or hold.
 Respond ONLY in this JSON format:
 {{"action": "buy/sell/hold", "symbol": "TICKER or null", "quantity": number, "reasoning": "why"}}
@@ -300,9 +324,12 @@ Respond ONLY in this JSON format:
         "reasoning": response.get("reasoning", ""),
     }
     # "success" here means "parsed", not "legal" -- nothing was checked against
-    # cash, holdings or risk limits on this path.
-    log_action(action_log_path, name, decision, "success")
+    # cash, holdings or risk limits on this path. The requested action is
+    # therefore identical to the executed one; it is still logged so both arms
+    # produce the same CSV columns and can be diffed directly.
     stats["requested"] = {"action": action, "symbol": symbol, "quantity": quantity}
+    log_action(action_log_path, name, decision, "success",
+               requested=stats["requested"])
     return decision, stats
 
 
@@ -337,6 +364,8 @@ def refresh_currently(persona: TradingPersona, market: MarketEnvironment) -> str
     s = persona.scratch
     prices = market.current_prices
     pv = persona.portfolio_value(prices)
+    cash = float(s.cash_balance)
+    cash_pct = (cash / pv * 100.0) if pv else 0.0
 
     if s.positions:
         holdings = []
@@ -344,18 +373,49 @@ def refresh_currently(persona: TradingPersona, market: MarketEnvironment) -> str
             px = prices.get(sym, pos["avg_price"])
             avg = pos["avg_price"] or px
             pnl_pct = ((px - avg) / avg * 100.0) if avg else 0.0
+            # Position weight. The bootstrap `currently` stated this ("roughly
+            # 8.7% of his $441,040 portfolio") and the first version of this
+            # function dropped it, leaving only raw share counts. Measured
+            # consequence: Alex Chen held for 200/200 steps justifying it with
+            # "current position in NVDA is already significant" while NVDA was
+            # 10% of his book and $402,600 sat idle. Absolute quantities do not
+            # tell an agent whether it is concentrated or under-deployed.
+            weight = (pos["qty"] * px / pv * 100.0) if pv else 0.0
             holdings.append(f"{pos['qty']} {sym} at avg ${avg:.2f} "
-                            f"(now ${px:.2f}, {pnl_pct:+.1f}%)")
+                            f"(now ${px:.2f}, {pnl_pct:+.1f}%, "
+                            f"{weight:.1f}% of portfolio)")
         holdings_str = "holds " + "; ".join(holdings)
     else:
         holdings_str = "holds no open positions"
 
-    max_trade = pv * float(getattr(s, "risk_limit_per_trade", 0.05) or 0.05)
+    # The spendable budget is the risk cap AND the cash, whichever binds first.
+    # Reporting the uncapped risk cap told Marcus Webb "maximum single trade
+    # $5,017" while his cash was $76.41 and get_legal_actions() -- which does
+    # apply min(cash, risk_cap) -- offered him no BUY at all. He then requested
+    # `buy NVDA x10` ($2,030) on 20 near-consecutive steps. The prompt was
+    # self-contradicting, so those requests are only partly the model's fault.
+    risk_cap  = pv * float(getattr(s, "risk_limit_per_trade", 0.05) or 0.05)
+    max_trade = max(0.0, min(risk_cap, cash))
+
+    # A nonzero budget that still buys no share reads as an invitation to
+    # purchase. Compare against the cheapest symbol the agent may trade so the
+    # wording matches what is actually possible.
+    tradeable = _get_tradeable_symbols(persona, market)
+    affordable = [prices[sym] for sym in tradeable
+                  if prices.get(sym) and prices[sym] <= max_trade]
+
+    if not affordable:
+        budget_str = (f"You cannot afford to buy any share right now "
+                      f"(spendable budget ${max_trade:,.0f}). Your only "
+                      f"options are HOLD or SELL. You cannot borrow.")
+    else:
+        budget_str = (f"Maximum value for a single trade is ${max_trade:,.0f} "
+                      f"(risk cap ${risk_cap:,.0f}, cash ${cash:,.0f}, "
+                      f"whichever is lower). You cannot borrow.")
 
     s.currently = (
-        f"{s.name} has ${s.cash_balance:,.0f} in cash and {holdings_str}. "
-        f"Total portfolio value ${pv:,.0f}. "
-        f"Maximum value for a single trade is ${max_trade:,.0f}."
+        f"{s.name} has ${cash:,.0f} in cash ({cash_pct:.1f}% of portfolio) "
+        f"and {holdings_str}. Total portfolio value ${pv:,.0f}. {budget_str}"
     )
     return s.currently
 
@@ -466,6 +526,16 @@ def execute_trading_action(persona: TradingPersona,
 
         fill = market.execute_order(name, {"type": "buy", "symbol": symbol,
                                            "quantity": quantity})
+        # execute_order() returns {"status": "rejected", "reason": ...} with no
+        # "total_value" key, so reading it unguarded raised KeyError and killed
+        # the whole run mid-step. Treat a venue rejection as a filtered order.
+        if fill.get("status") != "filled":
+            return _result(
+                f"[FILTERED] {name}'s {action.upper()} of {quantity} {symbol} "
+                f"was rejected by the venue: "
+                f"{fill.get('reason', 'unknown reason')}.",
+                filtered=True, hallucination=False, kind="venue_rejected")
+
         # Update portfolio. Cost basis uses the actual fill price, not the mid:
         # cash is debited fill["total_value"], so booking avg_price at `price`
         # understated the basis by the spread, slippage and commission.
@@ -506,6 +576,12 @@ def execute_trading_action(persona: TradingPersona,
 
         fill = market.execute_order(name, {"type": "sell", "symbol": symbol,
                                            "quantity": quantity})
+        if fill.get("status") != "filled":
+            return _result(
+                f"[FILTERED] {name}'s SELL of {quantity} {symbol} was rejected "
+                f"by the venue: {fill.get('reason', 'unknown reason')}.",
+                filtered=True, hallucination=False, kind="venue_rejected")
+
         s = persona.scratch
         s.cash_balance += fill["total_value"]
         s.positions[symbol]["qty"] -= quantity
@@ -571,18 +647,143 @@ def _check_stale_reasoning(reasoning: str, current_step: int,
 
 
 # ===========================================================================
+# Reasoning-vs-state grounding detector
+# ===========================================================================
+
+# Claims of the form "I already hold a lot of this" / "I have no room left".
+_CONCENTRATION_CLAIMS = (
+    "already significant", "already large", "already substantial",
+    "already sizable", "already sizeable", "fully invested",
+    "fully deployed", "no cash", "out of cash", "insufficient funds",
+    "maximum allowed", "max allowed", "at my limit", "at the limit",
+    "position limit", "no capital", "capital is tied up",
+    "heavily weighted", "overexposed", "over-exposed", "concentrated",
+)
+
+# Claims of the form "I have plenty of room".
+_CAPACITY_CLAIMS = (
+    "plenty of cash", "plenty of capital", "ample cash", "significant cash",
+    "cash on hand", "dry powder", "under-invested", "underinvested",
+)
+
+# A position at or below this share of portfolio value is not "significant";
+# at or above the upper bound it genuinely is.
+CONCENTRATION_FLOOR_PCT = 20.0
+CAPACITY_FLOOR_PCT      = 20.0
+
+
+def check_state_grounding(reasoning: str, persona: TradingPersona,
+                          market: MarketEnvironment) -> str:
+    """
+    Detect reasoning that contradicts the agent's own portfolio.
+
+    Everything else in this file validates the *action*. A HOLD is legal by
+    construction (execute_trading_action returns early on it), so an agent that
+    never trades cannot register a hallucination no matter what it claims. That
+    is not a hypothetical gap: Alex Chen held on 200/200 steps in both arms
+    while justifying it with "current position in NVDA is already significant"
+    -- NVDA was ~10% of his book and $402,600 sat in cash. Both arms scored him
+    perfectly clean, and middleware-Marcus held *more* than baseline-Marcus
+    (193 vs 181), so an arm can improve its hallucination rate purely by
+    trading less.
+
+    This check is deliberately restricted to claims that can be settled
+    arithmetically against cash / holdings / prices -- no keyword sentiment, no
+    judgement about whether a trade was wise. Returns a description of the
+    contradiction, or "" when the reasoning makes no checkable claim.
+    """
+    if not reasoning:
+        return ""
+
+    text = reasoning.lower()
+    s = persona.scratch
+    prices = market.current_prices
+    pv = persona.portfolio_value(prices)
+    if not pv:
+        return ""
+
+    cash     = float(s.cash_balance)
+    cash_pct = cash / pv * 100.0
+    findings = []
+
+    # 1. "I'm concentrated / out of room" while sitting on idle cash.
+    if any(c in text for c in _CONCENTRATION_CLAIMS):
+        largest_pct = 0.0
+        for sym, pos in (s.positions or {}).items():
+            px = prices.get(sym, pos.get("avg_price") or 0.0)
+            largest_pct = max(largest_pct, pos.get("qty", 0) * px / pv * 100.0)
+        if largest_pct <= CONCENTRATION_FLOOR_PCT and cash_pct >= 25.0:
+            findings.append(
+                f"claims concentration//no-capacity but largest position is "
+                f"{largest_pct:.1f}% of portfolio and cash is {cash_pct:.1f}% "
+                f"(${cash:,.0f})")
+
+    # 2. "I have plenty of cash" while effectively broke.
+    if any(c in text for c in _CAPACITY_CLAIMS) and cash_pct < 5.0:
+        findings.append(
+            f"claims spare capital but cash is {cash_pct:.1f}% of portfolio "
+            f"(${cash:,.0f})")
+
+    # 3. Names a symbol as held that it does not hold.
+    held = {sym.upper() for sym in (s.positions or {})}
+    for sym in prices:
+        if sym.upper() in held:
+            continue
+        for phrase in (f"my {sym.lower()} position", f"my position in {sym.lower()}",
+                       f"holding {sym.lower()}", f"my {sym.lower()} shares"):
+            if phrase in text:
+                findings.append(f"refers to a {sym} position it does not hold")
+                break
+
+    return "; ".join(findings[:2])
+
+
+# Steps within which an identical repeated request counts as the same episode.
+EPISODE_GAP_STEPS = 3
+
+
+def _count_episodes(halluc_requests: list) -> int:
+    """
+    Collapse consecutive identical hallucinated requests into one episode.
+
+    `halluc_requests` is [(step, (action, symbol, quantity)), ...] for a single
+    agent. A run of the same request with no more than EPISODE_GAP_STEPS
+    between consecutive occurrences is one episode; a different request, or a
+    longer gap, starts a new one.
+
+    The gap is a reporting parameter, not a measurement: changing it changes
+    the episode count, so the raw count is always reported next to it.
+    """
+    episodes = 0
+    prev_key = None
+    prev_step = None
+    for step, key in sorted(halluc_requests, key=lambda r: (r[0] is None, r[0])):
+        if (prev_key is None or key != prev_key or step is None
+                or prev_step is None or step - prev_step > EPISODE_GAP_STEPS):
+            episodes += 1
+        prev_key, prev_step = key, step
+    return episodes
+
+
+# ===========================================================================
 # Simulation class
 # ===========================================================================
 
 class TradingReverie:
 
     def __init__(self, sim_code: str, fork_sim_code: str = "base_trading",
-                 use_middleware: bool = True, fresh: bool = False):
+                 use_middleware: bool = True, fresh: bool = False,
+                 seed: int = 42):
         self.sim_code       = sim_code
         self.fork_sim_code  = fork_sim_code
         self.use_middleware = use_middleware
+        self.seed           = seed
         self.sim_folder    = f"{fs_storage}/{sim_code}"
-        self.market        = HistoricalMarketEnvironment(seed=42)
+        # Seed is a parameter so an arm can be replicated. A single run of each
+        # arm cannot support a claim about a rate difference -- run 03 produced
+        # 3 baseline hallucination events in total -- and the two arms must
+        # share a seed to be paired.
+        self.market        = HistoricalMarketEnvironment(seed=seed)
         self.action_filter_log_path = str(
             Path(self.sim_folder) / "reverie" / "action_filter_log.csv"
         )
@@ -755,6 +956,12 @@ class TradingReverie:
         # reflect() and memory nodes use this for timestamps.
         persona.scratch.curr_time = self.market.current_time
 
+        # Portfolio value BEFORE this step's trade. The log's portfolio_value is
+        # recorded after execution, so taking the first entry as the starting
+        # value silently excluded the first trade from PnL -- an agent that
+        # bought on step 0 had that purchase's cost baked into its "start".
+        pv_before = persona.portfolio_value(self.market.current_prices)
+
         # 2. Perceive
         market_perceive(persona, self.market, events)
 
@@ -820,15 +1027,53 @@ class TradingReverie:
         halluc_kind = result["halluc_kind"] or (
             "illegal_request" if illegal_request else "")
 
+        # Where the infeasible request ended up. Raw counts of `hallucinated`
+        # are not comparable across arms on their own: the filtered arm catches
+        # requests before execution, the baseline arm can only catch them at
+        # execution, and the baseline's clamped orders *execute anyway* at a
+        # corrected size. Splitting the disposition is what lets the report say
+        # "44 caught, 0 executed" against "3 caught, 3 executed" instead of
+        # implying the filtered arm hallucinates more.
+        if not hallucinated:
+            halluc_disposition = ""
+        elif illegal_request or result["filtered"]:
+            halluc_disposition = "caught_pre_execution"
+        else:
+            halluc_disposition = "executed_malformed"
+
         # Print with clear hallucination markers
         if hallucinated:
-            print(f"  [{name}] *** HALLUCINATION CAUGHT *** [{halluc_kind}] {outcome}")
+            print(f"  [{name}] *** HALLUCINATION CAUGHT *** "
+                  f"[{halluc_kind}/{halluc_disposition}] {outcome}")
         else:
             print(f"  [{name}] {outcome}")
 
         # 7. Record fill in memory
         if result["fill"] and not result["filtered"]:
             record_trade_fill(persona, self.market, result["fill"])
+
+        # 7b. Feed the failure back so the agent can see it happened. Both arms,
+        # for the reason documented on record_order_feedback().
+        feedback = ""
+        req = filter_stats.get("requested") or {}
+        if illegal_request and req.get("action") in ("buy", "sell"):
+            feedback = (
+                f"{name}'s order to {req['action']} {req.get('quantity')} "
+                f"{req.get('symbol')} was REJECTED: "
+                f"{filter_stats.get('error_reason') or 'not a permitted action'}. "
+                f"Cash ${persona.scratch.cash_balance:,.0f}. "
+                f"Do not repeat this order unless the position or cash changes.")
+        elif result["filtered"]:
+            feedback = (
+                f"{name}'s order was REJECTED: {outcome} "
+                f"Do not repeat this order unless the position or cash changes.")
+        elif result["hallucination"] and result["filled_quantity"]:
+            feedback = (
+                f"{name} requested {result['requested_quantity']} shares but "
+                f"only {result['filled_quantity']} were permitted; the order "
+                f"was reduced. Cash ${persona.scratch.cash_balance:,.0f}.")
+        if feedback:
+            record_order_feedback(persona, self.market, feedback)
 
         # 8. Detect stale-news hallucination:
         # If agent cites reasoning that references a news headline older than
@@ -841,11 +1086,18 @@ class TradingReverie:
             print(f"  [{name}] *** STALE CONTEXT *** reasoning may reference "
                   f"outdated news: {stale_flag}")
 
+        # 8a2. Reasoning-vs-state grounding. Runs on every decision including
+        # HOLD, which is the only detector here that does -- see
+        # check_state_grounding() for why that matters.
+        grounding_flag = check_state_grounding(reasoning, persona, self.market)
+        if grounding_flag:
+            print(f"  [{name}] *** STATE CONTRADICTION *** {grounding_flag}")
+
         # 8b. Persona consistency — did the LLM stay in character?
         # None means "not scoreable" (no reasoning was produced at all), which
         # is distinct from "scored badly" and must not be averaged in as either.
         drift_score = score_persona_consistency(reasoning, persona)
-        if drift_score is not None and drift_score < PERSONA_DRIFT_THRESHOLD:
+        if drift_score is not None and drift_score <= PERSONA_DRIFT_THRESHOLD:
             print(f"  [{name}] *** PERSONA DRIFT *** consistency score "
                   f"{drift_score:.2f} (reasoning may contradict agent profile)")
 
@@ -860,7 +1112,9 @@ class TradingReverie:
             "outcome":             outcome,
             "hallucination":       hallucinated,
             "halluc_kind":         halluc_kind,
+            "halluc_disposition":  halluc_disposition,
             "illegal_request":     illegal_request,
+            "order_feedback":      feedback,
             "requested_quantity":  result["requested_quantity"],
             "filled_quantity":     result["filled_quantity"],
             "filtered":            result["filtered"],
@@ -871,10 +1125,12 @@ class TradingReverie:
             # instead of counting unscoreable decisions as passes.
             "has_reasoning":       bool((reasoning or "").strip()),
             "stale_context":       stale_flag,
+            "state_contradiction": grounding_flag,
             "persona_drift_score": drift_score,
             "compression":         mc_stats,
             "cash":                round(persona.scratch.cash_balance, 2),
-            "portfolio_value":     pv,
+            "portfolio_value":        pv,
+            "portfolio_value_before": pv_before,
             "positions":           {s: dict(p)
                                     for s, p in persona.scratch.positions.items()},
             "market_prices":       dict(self.market.current_prices),
@@ -905,10 +1161,16 @@ class TradingReverie:
                 "trade_attempts":        0,  # buy/sell REQUESTED, pre-filter
                 "action_hallucinations": 0,
                 "halluc_kinds":          Counter(),
+                # Disposition split -- see halluc_disposition in _step_agent().
+                "caught_pre_execution":  0,
+                "executed_malformed":    0,
+                # (step, request) of every hallucination, for episode collapsing
+                "halluc_requests":       [],
                 "fallback_decisions":    0,
                 "reasoned_decisions":    0,  # non-empty reasoning: the only
                                              # decisions stale/drift can score
                 "stale_context_hits":    0,
+                "state_contradictions":  0,
                 "drift_scores":          [],  # persona_drift_score per step
                 "mc_nodes_in":           0,
                 "mc_nodes_out":          0,
@@ -931,7 +1193,8 @@ class TradingReverie:
         for entry in log:
             name = entry["agent"]
             if name not in seen_start:
-                per_agent[name]["start_portfolio"] = entry["portfolio_value"]
+                per_agent[name]["start_portfolio"] = entry.get(
+                    "portfolio_value_before", entry["portfolio_value"])
                 seen_start.add(name)
 
         for entry in log:
@@ -962,9 +1225,22 @@ class TradingReverie:
             if entry.get("hallucination"):
                 ag["action_hallucinations"] += 1
                 ag["halluc_kinds"][entry.get("halluc_kind") or "unspecified"] += 1
+                disp = entry.get("halluc_disposition")
+                if disp == "caught_pre_execution":
+                    ag["caught_pre_execution"] += 1
+                elif disp == "executed_malformed":
+                    ag["executed_malformed"] += 1
+                req = entry.get("requested") or {}
+                ag["halluc_requests"].append((
+                    entry.get("step"),
+                    (req.get("action"), req.get("symbol"), req.get("quantity")),
+                ))
 
             if entry.get("stale_context"):
                 ag["stale_context_hits"] += 1
+
+            if entry.get("state_contradiction"):
+                ag["state_contradictions"] += 1
 
             drift = entry.get("persona_drift_score")
             if drift is not None:
@@ -1003,14 +1279,29 @@ class TradingReverie:
             reasoned = ag["reasoned_decisions"]
             stale_rate = (round(ag["stale_context_hits"] / reasoned * 100, 1)
                           if reasoned else None)
+            contradiction_rate = (
+                round(ag["state_contradictions"] / reasoned * 100, 1)
+                if reasoned else None)
             fallback_rate  = round(ag["fallback_decisions"]    / total  * 100, 1)
             pnl            = round(ag["end_portfolio"] - ag["start_portfolio"], 2)
+
+            # Distinct episodes. A blocked order leaves cash and holdings
+            # untouched, so the next step rebuilds nearly the same prompt and
+            # the model reissues the same request; 27 of run 03's 44 recorded
+            # hallucinations were a single agent repeating `buy NVDA x10`.
+            # Counting those as 27 independent errors lets one livelocked agent
+            # set the headline number. Reported ALONGSIDE the raw count, never
+            # instead of it -- collapsing is a way to read the data, not a
+            # correction to it.
+            episodes = _count_episodes(ag["halluc_requests"])
+            episode_rate = (round(episodes / attempts * 100, 1)
+                            if attempts else None)
 
             # drift_scores only ever collects non-None values, so this averages
             # over decisions that were actually scoreable.
             scores = ag["drift_scores"]
             avg_drift  = round(sum(scores) / len(scores), 2) if scores else None
-            drift_events = sum(1 for s in scores if s < PERSONA_DRIFT_THRESHOLD)
+            drift_events = sum(1 for s in scores if s <= PERSONA_DRIFT_THRESHOLD)
 
             summary[name] = {
                 "total_decisions":              ag["total_decisions"],
@@ -1019,11 +1310,23 @@ class TradingReverie:
                 "action_hallucinations":        ag["action_hallucinations"],
                 "action_hallucination_rate_pct": action_h_rate,
                 "hallucination_kinds":          dict(ag["halluc_kinds"]),
+                # Disposition: caught before execution vs actually executed in
+                # a malformed (clamped) form. The filtered arm can only produce
+                # the former, the baseline arm mostly the latter, so the raw
+                # totals are not like-for-like without this split.
+                "caught_pre_execution":         ag["caught_pre_execution"],
+                "executed_malformed":           ag["executed_malformed"],
+                "hallucination_episodes":       episodes,
+                "hallucination_episode_rate_pct": episode_rate,
                 "fallback_decisions":           ag["fallback_decisions"],
                 "fallback_rate_pct":            fallback_rate,
                 "reasoned_decisions":           ag["reasoned_decisions"],
                 "stale_context_hits":           ag["stale_context_hits"],
                 "stale_context_rate_pct":       stale_rate,
+                # Reasoning that contradicts the agent's own book. The only
+                # metric here that can score a HOLD.
+                "state_contradictions":         ag["state_contradictions"],
+                "state_contradiction_rate_pct": contradiction_rate,
                 "avg_persona_consistency":      avg_drift,
                 "persona_drift_events":         drift_events,
                 "scored_decisions":             len(scores),
@@ -1050,6 +1353,11 @@ class TradingReverie:
 
         total_decisions = sum(a["total_decisions"] for a in per_agent.values())
         total_attempts  = sum(a["trade_attempts"]  for a in per_agent.values())
+        total_caught    = sum(a["caught_pre_execution"] for a in per_agent.values())
+        total_executed  = sum(a["executed_malformed"]   for a in per_agent.values())
+        total_episodes  = sum(s["hallucination_episodes"] for s in summary.values())
+        total_contra    = sum(a["state_contradictions"] for a in per_agent.values())
+        total_reasoned  = sum(a["reasoned_decisions"]   for a in per_agent.values())
         return {
             "middleware_enabled":          self.use_middleware,
             "simulation_steps":            n_steps,
@@ -1063,6 +1371,16 @@ class TradingReverie:
             "overall_hallucination_rate_pct":
                 (round(total_hallucinations / total_attempts * 100, 1)
                  if total_attempts else None),
+            "total_caught_pre_execution":  total_caught,
+            "total_executed_malformed":    total_executed,
+            "total_hallucination_episodes": total_episodes,
+            "overall_episode_rate_pct":
+                (round(total_episodes / total_attempts * 100, 1)
+                 if total_attempts else None),
+            "total_state_contradictions":  total_contra,
+            "overall_state_contradiction_rate_pct":
+                (round(total_contra / total_reasoned * 100, 1)
+                 if total_reasoned else None),
             "per_agent": summary,
         }
 
@@ -1082,6 +1400,23 @@ class TradingReverie:
         else:
             print(f"Total hallucinations : {report['total_hallucinations']}  "
                   f"({overall}% of {report['total_trade_attempts']} trade attempts)")
+        # The number that is actually comparable across arms. Raw counts are
+        # not: the filtered arm intercepts requests before execution, so it
+        # reports many caught / none executed, while the baseline arm silently
+        # clamps and executes them. "Caught" without "executed" reads as the
+        # filtered arm being worse when it is doing its job.
+        print(f"  caught before execution : {report.get('total_caught_pre_execution', 0)}")
+        print(f"  EXECUTED malformed      : {report.get('total_executed_malformed', 0)}"
+              f"   <- reached the market")
+        ep_rate = report.get("overall_episode_rate_pct")
+        print(f"  distinct episodes       : "
+              f"{report.get('total_hallucination_episodes', 0)}"
+              + (f"  ({ep_rate}% of attempts)" if ep_rate is not None else ""))
+        c_rate = report.get("overall_state_contradiction_rate_pct")
+        print(f"State contradictions : {report.get('total_state_contradictions', 0)}"
+              + (f"  ({c_rate}% of reasoned decisions)" if c_rate is not None
+                 else "  (rate N/A)")
+              + "   <- includes HOLDs")
         print()
         for name, ag in report["per_agent"].items():
             print(f"  {name}")
@@ -1097,6 +1432,12 @@ class TradingReverie:
                 kinds = "  ".join(f"{k}={v}"
                                   for k, v in sorted(ag["hallucination_kinds"].items()))
                 print(f"      by kind: {kinds}")
+            ep = ag.get("hallucination_episodes", 0)
+            ep_r = ag.get("hallucination_episode_rate_pct")
+            print(f"      caught={ag.get('caught_pre_execution', 0)}  "
+                  f"executed={ag.get('executed_malformed', 0)}  "
+                  f"episodes={ep}"
+                  + (f" ({ep_r}%)" if ep_r is not None else ""))
             # Without this you cannot tell "the middleware improved the metrics"
             # from "the middleware produced empty reasoning strings", since a
             # fallback decision has reasoning="" and so scores clean on both
@@ -1110,6 +1451,11 @@ class TradingReverie:
                          else f"{stale_pct}% of {ag['reasoned_decisions']} reasoned")
             print(f"    Stale context hits    : {ag['stale_context_hits']}  "
                   f"({stale_str})")
+            c_pct = ag.get("state_contradiction_rate_pct")
+            c_str = ("N/A (no reasoning produced)" if c_pct is None
+                     else f"{c_pct}% of {ag['reasoned_decisions']} reasoned")
+            print(f"    State contradictions  : {ag.get('state_contradictions', 0)}  "
+                  f"({c_str})")
             avg_c = ag.get("avg_persona_consistency")
             drift_e = ag.get("persona_drift_events", 0)
             scored = ag.get("scored_decisions", 0)
@@ -1189,11 +1535,15 @@ def main():
                              "menu. Scoring is unchanged, so the resulting "
                              "hallucination_report.json is directly comparable "
                              "to a normal run.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Market seed. Paired arms MUST share a seed, and "
+                             "several seeds per arm are needed before a rate "
+                             "difference means anything.")
     args = parser.parse_args()
 
     sim = TradingReverie(args.sim, args.fork,
                          use_middleware=not args.no_middleware,
-                         fresh=args.fresh)
+                         fresh=args.fresh, seed=args.seed)
     sim.run(args.steps)
 
 

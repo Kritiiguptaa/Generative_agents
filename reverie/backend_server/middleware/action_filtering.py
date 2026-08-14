@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 import csv
 import json
 import os
@@ -43,10 +43,31 @@ def _get_holdings(agent_state) -> Dict[str, int]:
 
 
 def _get_max_trade_size(agent_state, market_state) -> float:
+	"""Risk cap alone, ignoring cash. Callers that show a number to the model
+	must use _get_spendable_budget() instead -- see the note there."""
 	if not hasattr(agent_state, "scratch"):
 		return 0.0
 	portfolio_value = agent_state.portfolio_value(market_state.current_prices)
 	return portfolio_value * float(getattr(agent_state.scratch, "risk_limit_per_trade", 0.0))
+
+
+def _get_spendable_budget(agent_state, market_state) -> float:
+	"""
+	What the agent can actually spend on one purchase: the risk cap AND the
+	cash, whichever binds first.
+
+	get_legal_actions() has always applied min(cash, risk_cap) when building the
+	BUY menu, but build_prompt() printed the raw risk cap as "Max single-trade
+	size". Marcus Webb was therefore shown "Max single-trade size: $5,017.00"
+	while holding $76.41, with a legal list that contained no BUY at all. He
+	requested `buy NVDA x10` ($2,030) on 20 near-consecutive steps. A prompt
+	that advertises a budget the agent does not have manufactures exactly the
+	infeasible requests this module exists to count.
+	"""
+	if not hasattr(agent_state, "scratch"):
+		return 0.0
+	cash = float(getattr(agent_state.scratch, "cash_balance", 0.0))
+	return max(0.0, min(cash, _get_max_trade_size(agent_state, market_state)))
 
 
 def get_legal_actions(agent_state, market_state) -> List[Action]:
@@ -137,7 +158,22 @@ def build_prompt(agent_state, market_state, memory_context: str) -> Tuple[str, L
 	positions = _get_holdings(agent_state)
 	market_open = "OPEN" if _market_is_open(market_state) else "CLOSED"
 	prices = getattr(market_state, "current_prices", {})
-	max_trade_size = _get_max_trade_size(agent_state, market_state)
+	risk_cap = _get_max_trade_size(agent_state, market_state)
+	budget = _get_spendable_budget(agent_state, market_state)
+	# Derive the wording from the menu that was actually built, rather than from
+	# budget > 0. A budget of $76.41 is nonzero but buys no share of any
+	# tradeable symbol (cheapest is $150), so get_legal_actions() offers no BUY
+	# while a bare budget figure still reads as an invitation to purchase. The
+	# two must agree or the prompt contradicts its own action list again.
+	can_buy = any(a.type == "BUY" for a in legal_actions)
+	if not can_buy:
+		budget_line = (f"You cannot afford to buy any share right now "
+		               f"(spendable budget ${budget:,.2f}). Only HOLD or SELL "
+		               f"are available.")
+	else:
+		budget_line = (f"Spendable budget for one purchase: ${budget:,.2f} "
+		               f"(risk cap ${risk_cap:,.2f}, cash ${cash_balance:,.2f}, "
+		               f"whichever is lower).")
 
 	prompt = f"""
 You are {name}, a {persona} trader.
@@ -145,7 +181,7 @@ Traits: {innate}
 Background: {learned}
 Current situation: {currently}
 Risk tolerance: {risk_tolerance}
-Max single-trade size: ${max_trade_size:,.2f}
+{budget_line}
 
 Current state:
 - Cash: ${cash_balance:,.2f}
@@ -157,6 +193,11 @@ Market:
 
 Memory:
 {memory_context}
+
+Rules:
+- You cannot borrow money or trade on margin. A purchase's total cost
+  (price x quantity) must not exceed your spendable budget above.
+- You cannot sell shares you do not hold.
 
 You MUST choose from ONLY these actions:
 {action_str}
@@ -369,15 +410,25 @@ def validate_response(
 	return response, None
 
 
+LOG_COLUMNS = [
+	"timestamp", "agent", "action", "symbol", "quantity", "status",
+	"error_reason",
+	# What the model actually asked for before validation. The first four
+	# columns hold the FINAL action, so a request that was rejected and retried
+	# into a HOLD logged as `hold,,0` -- all 44 rejections in run 03 were
+	# indistinguishable from a genuine hold, and the CSV could not be audited
+	# without cross-referencing trading_log.json.
+	"requested_action", "requested_symbol", "requested_quantity",
+]
+
+
 def _ensure_log_header(log_path: str) -> None:
 	if os.path.exists(log_path):
 		return
 	os.makedirs(os.path.dirname(log_path), exist_ok=True)
 	with open(log_path, "w", encoding="utf-8", newline="") as handle:
 		writer = csv.writer(handle)
-		writer.writerow(
-			["timestamp", "agent", "action", "symbol", "quantity", "status", "error_reason"]
-		)
+		writer.writerow(LOG_COLUMNS)
 
 
 def log_action(
@@ -386,17 +437,23 @@ def log_action(
 	action: Dict[str, object],
 	status: str,
 	error_reason: str = "",
+	requested: Optional[Dict[str, object]] = None,
 ) -> None:
 	_ensure_log_header(log_path)
-	timestamp = datetime.utcnow().isoformat()
+	# utcnow() returns a naive datetime and is deprecated in 3.12+; the log is
+	# compared against market timestamps, so the offset has to be explicit.
+	timestamp = datetime.now(timezone.utc).isoformat()
 	action_type = action.get("action")
 	symbol = action.get("symbol")
 	quantity = action.get("quantity")
+	req = requested or {}
 	with open(log_path, "a", encoding="utf-8", newline="") as handle:
 		writer = csv.writer(handle)
-		writer.writerow(
-			[timestamp, agent_name, action_type, symbol, quantity, status, error_reason]
-		)
+		writer.writerow([
+			timestamp, agent_name, action_type, symbol, quantity, status,
+			error_reason,
+			req.get("action"), req.get("symbol"), req.get("quantity"),
+		])
 
 
 def run_action_filtering_step(
@@ -434,15 +491,19 @@ def run_action_filtering_step(
 		"requested": describe_request(response_text),
 	}
 
+	requested = stats["requested"]
+
 	if response is not None:
-		log_action(log_path, _get_agent_name(agent_state), response, "success")
+		log_action(log_path, _get_agent_name(agent_state), response, "success",
+		           requested=requested)
 		return response, stats
 
 	retry_prompt = prompt + f"\n\nValidation error: {error}. Try again."
 	retry_text = llm_call(retry_prompt)
 	retry_response, retry_error = validate_response(retry_text, legal_actions)
 	if retry_response is not None:
-		log_action(log_path, _get_agent_name(agent_state), retry_response, "retry", error)
+		log_action(log_path, _get_agent_name(agent_state), retry_response, "retry",
+		           error, requested=requested)
 		stats["status"] = "retry"
 		return retry_response, stats
 
@@ -453,6 +514,7 @@ def run_action_filtering_step(
 		fallback,
 		"fallback",
 		retry_error or "validation failed twice",
+		requested=requested,
 	)
 	stats["status"] = "fallback"
 	# A second illegal attempt still counts, even if the first was just malformed.

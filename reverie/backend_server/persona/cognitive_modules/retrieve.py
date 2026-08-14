@@ -488,7 +488,13 @@ def new_retrieve(persona, focal_points, n_count=30):
     nodes = [[i.last_accessed, i]
               for i in persona.a_mem.seq_event + persona.a_mem.seq_thought
               if "idle" not in i.embedding_key]
-    nodes = sorted(nodes, key=lambda x: x[0])
+    # NEWEST first. extract_recency() assigns recency_decay ** i for
+    # i = 1..len(nodes) by list position, so position 0 receives the LARGEST
+    # weight. Sorting ascending therefore handed the oldest memory the highest
+    # recency score and decayed the newest one hardest -- the exact inverse of
+    # what the term is supposed to express. With recency_decay < 1 and hundreds
+    # of nodes, the newest memories were scored at effectively zero recency.
+    nodes = sorted(nodes, key=lambda x: x[0], reverse=True)
     nodes = [i for created, i in nodes]
 
     if not nodes:

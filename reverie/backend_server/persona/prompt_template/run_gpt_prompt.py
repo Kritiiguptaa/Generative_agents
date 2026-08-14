@@ -2194,7 +2194,11 @@ def run_gpt_prompt_focal_pt(persona, statements, n, test_input=None, verbose=Fal
 
 
 
-  gpt_param = {"engine": "text-davinci-003", "max_tokens": 150, 
+  # Raised from 150. Ollama reported done_reason == "length" on 85 calls in
+  # run 03, all at num_predict=150 -- the reflection prompts. A truncated
+  # focal-point list is silently stored and then drives retrieval for the rest
+  # of the step.
+  gpt_param = {"engine": "text-davinci-003", "max_tokens": 300, 
                "temperature": 0, "top_p": 1, "stream": False,
                "frequency_penalty": 0, "presence_penalty": 0, "stop": None}
   prompt_template = "persona/prompt_template/v2/generate_focal_pt_v1.txt"
@@ -2245,7 +2249,10 @@ def run_gpt_prompt_insight_and_guidance(persona, statements, n, test_input=None,
 
 
 
-  gpt_param = {"engine": "text-davinci-003", "max_tokens": 150, 
+  # Raised from 150 -- see the note on generate_focal_pt above. A truncated
+  # insight is written into a_mem as a thought node and then retrieved as if
+  # it were a complete one.
+  gpt_param = {"engine": "text-davinci-003", "max_tokens": 400, 
                "temperature": 0.5, "top_p": 1, "stream": False,
                "frequency_penalty": 0, "presence_penalty": 0, "stop": None}
   prompt_template = "persona/prompt_template/v2/insight_and_evidence_v1.txt"

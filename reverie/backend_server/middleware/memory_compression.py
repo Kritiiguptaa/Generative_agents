@@ -46,6 +46,7 @@ Description: Prompt-level memory compression for the trading simulation.
 """
 
 import datetime
+import traceback
 from typing import Optional
 
 # Sort floor for nodes with no timestamp -- keeps every sort key datetime-typed
@@ -405,8 +406,23 @@ def compress_memories(retrieved: dict, persona, market, config=None):
             chars_out=len(text),
         )
 
-    except Exception:
+    except Exception as exc:
         # Never break the simulation: fall back to the uncompressed block.
+        #
+        # But say so. This used to swallow the exception and return stats that
+        # were indistinguishable from a genuine no-op compression, while the
+        # caller still recorded enabled=True. A middleware arm whose
+        # compression crashed on every step would report as a working
+        # middleware arm that happened to find nothing to compress, and the
+        # ablation would silently be comparing baseline against baseline.
+        traceback.print_exc()
+        print(f"  [memory_compression] FAILED for "
+              f"{getattr(getattr(persona, 'scratch', None), 'name', '?')}: "
+              f"{type(exc).__name__}: {exc} -- falling back to uncompressed "
+              f"context. This step's compression stats are not meaningful.")
         lines = [f"- {getattr(n, 'description', '')}" for n in raw_nodes]
         text = "\n".join(lines) if lines else "No relevant memories."
-        return text, _stats(nodes_in, 0, 0, 0, 0, len(text))
+        stats = _stats(nodes_in, 0, 0, 0, 0, len(text))
+        stats["failed"] = True
+        stats["error"] = f"{type(exc).__name__}: {exc}"
+        return text, stats

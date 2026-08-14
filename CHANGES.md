@@ -664,3 +664,208 @@ Reports land at
    question.
 
 `trade_attempts=0` printing `N/A` is correct behaviour, not a bug.
+
+---
+
+# ============================================================
+# Run 03 analysis and the fixes that followed
+# ============================================================
+
+## 13. Run 03 results
+
+First run where the metric produced usable numbers.
+
+| | baseline | middleware |
+|---|---|---|
+| decisions | 600 | 600 |
+| trade attempts | 21 | 87 |
+| hallucinations | 3 (14.3%) | 44 (50.6%) |
+| kinds | all `clamped_*` | all `illegal_request` |
+| fallbacks | 2 | 3 |
+| Ollama errors | 0 | 0 |
+
+The three run-02 fixes all landed:
+
+- **ANALYZE removal** — `analyze: 0` for every agent in both arms; trading resumed.
+- **`refresh_currently`** — Alex's reasoning became varied and genuine (88 distinct
+  strings) instead of restating his bootstrap intent text.
+- **News persistence** — the stale detector fired on a real contradiction:
+  `'deliveries' (from step 30, 127 steps ago; contradicted at step 40)`.
+
+### 13.1 All 44 middleware hallucinations were genuine — and all one bug
+
+Audited every one against `trading_log.json`. **Zero false positives**: every
+rejected request exceeded available cash. But the pattern was damning:
+
+```
+step 36-59   Marcus Webb   buy NVDA x10   cash=$76.41   cost=$2,030
+step 175-199 Sara Kim      buy NVDA x10   cash=$199     cost=$2,266
+```
+
+27 of the 44 were the identical request `buy NVDA x10`. Cash bound all 44; the
+risk cap additionally bound 20.
+
+### 13.2 Root cause: the prompt advertised a budget the agent did not have
+
+`get_legal_actions()` has always applied `min(cash, risk_cap)` when building the
+BUY menu. `build_prompt()` printed the **raw risk cap**:
+
+```
+Max single-trade size: $5,017.00     <- risk cap
+- Cash: $76.41                       <- reality
+You MUST choose from ONLY these actions:
+- HOLD ...                           <- no BUY on the menu
+```
+
+The model was told it could spend $5,017, shown $76, and given a menu with no
+BUY. The requests are only partly the model's fault. Same defect in
+`refresh_currently()` for the baseline arm.
+
+### 13.3 Second cause: filtering without feedback causes livelock
+
+Blocking an order leaves cash and holdings untouched, so the next step rebuilds
+a near-identical prompt and the model reissues the same request.
+
+```
+MW-Marcus   steps 15-62: cash = $76.41, ONE distinct value across 48 steps
+BASE-Marcus steps 15-62: cash moved through 5 values, $21,077-$22,117
+```
+
+The baseline never livelocks because doing *something* always changes its state.
+
+### 13.4 Why 50.6% vs 14.3% was never a valid comparison
+
+Three independent reasons, none of which is "middleware hallucinates more":
+
+1. **Different detection stages.** The filtered arm catches requests before
+   execution; the baseline can only catch them at execution, where they
+   *execute anyway* at a clamped size.
+2. **Different populations.** MW-Marcus was broke at $76 while BASE-Marcus had
+   $21K. Not one agent under two conditions — two agents in different
+   situations.
+3. **Repeat inflation.** One livelocked agent contributed 27 of 44.
+
+The comparison that *is* valid and was true all along:
+
+> Middleware caught 44 infeasible requests and executed **0**.
+> The baseline caught 3 and executed **all 3**.
+
+### 13.5 Refuted: "compression degrades persona consistency"
+
+Marcus's score fell 0.98 (baseline) to 0.82 (middleware), which read as the
+anchoring layer damaging identity. It was a defect in the scorer.
+
+The watchlist check penalised reasoning that named **no** watchlist ticker.
+Compressed context produces shorter reasoning, so:
+
+```
+Marcus BASE: names a watchlist symbol in 93% of reasonings -> 0.978
+Marcus MW:   46%                                            -> 0.820
+```
+
+It was measuring brevity, not character. It also missed company names entirely
+— "NVIDIA smashes Q4 estimates" scored as watchlist-blind because `NVIDIA` does
+not contain `NVDA`. After correcting the check to match its own docstring
+("acting on a symbol not in the watchlist"), rescoring run 03's reasoning gives
+**1.000 in both arms** for Marcus and Sara. The gap was entirely artifact.
+
+---
+
+## 14. Fixes from the run 03 analysis
+
+All verified; 100 tests pass (`tests/test_hallucination_metrics.py` adds 23).
+
+| # | Fix | Files |
+|---|---|---|
+| A1 | Budget shown = `min(cash, risk_cap)`; wording derived from the actual menu, never from `budget > 0` | `action_filtering.py`, `trading_reverie.py` |
+| A1b | `currently` reports cash % and position weight % (bootstrap had this; my first version dropped it) | `trading_reverie.py` |
+| A3 | `--seed` on both runners | `trading_reverie.py` |
+| B2 | `check_state_grounding()` — reasoning vs actual book; **the only detector that scores a HOLD** | `trading_reverie.py` |
+| B3 | Drift threshold comparison `<` to `<=` (a 2-check agent scored exactly 0.50 and passed) | `persona_anchoring.py`, `trading_reverie.py` |
+| B4 | Removed the stale-signal check — it double-counted `stale_context` | `persona_anchoring.py` |
+| B5 | `halluc_disposition`: `caught_pre_execution` vs `executed_malformed` | `trading_reverie.py` |
+| B6 | `_count_episodes()` — raw AND distinct, never distinct alone | `trading_reverie.py` |
+| C1 | `record_order_feedback()` — rejections/partial fills enter memory, **both arms** | `market_perceive.py`, `trading_reverie.py` |
+| C2 | Explicit no-borrow / no-naked-sell rules in both prompts | both prompts |
+| D1 | CSV logs `requested_action/symbol/quantity` (all 44 rejections logged as `hold,,0`) | `action_filtering.py` |
+| D2 | Watchlist check matches its docstring + company-name aliases | `persona_anchoring.py` |
+| A2 | **`paired_eval.py`** — new harness, both arms decide from identical state | new file |
+| E | venue-rejection KeyError; `start_portfolio` uses pre-trade value; compression failures surfaced; daily planner `format="json"` and no blank-line stop; recency ordering inverted; reflection caps 150 to 300/400; `utcnow()`; frozen-price warning | various |
+
+### 14.1 The recency bug (E)
+
+`new_retrieve()` sorted nodes **ascending** by `last_accessed`, and
+`extract_recency()` assigns `recency_decay ** i` by list position — so position
+0 got the *largest* weight. The oldest memory was scored most-recent and the
+newest was decayed hardest. Now sorted `reverse=True`.
+
+This changes retrieval in **both** arms, so run 04 is not comparable to run 03.
+
+### 14.2 paired_eval.py — what it does and does not claim
+
+One canonical simulation advances the world. Each step, both decision paths run
+against the **same** persona state, prices and retrieved memories; the requests
+are recorded as a matched pair. Only `--advance-with` executes.
+
+Reports a McNemar contingency table — the discordant cells are the only ones
+carrying information about a within-subject difference.
+
+**Limitation, stated plainly:** the non-advancing arm's requests are
+counterfactual one-step-ahead requests from the *other* arm's trajectory. Run
+`--advance-with` both ways. If the conclusion flips, the effect is not robust
+and must not be reported as one.
+
+---
+
+## 15. Still open after run 03
+
+- **n=1.** Three baseline events cannot support a rate claim. Needs several
+  seeds per arm before anything is reportable.
+- **6.2** OLLAMA error sentinel still conflates server failure with model failure.
+- **6.3** stale-context word search is still a bare substring scan.
+- **6.6 / 6.7** noise filter and poignancy scale — untouched.
+- **Persona layer has almost no signal.** After the D2 correction the scorer
+  returns ~1.0 nearly everywhere on run 03 data (1 drift event total). That is
+  honest — agents genuinely did not name off-watchlist stocks — but it means
+  this layer currently demonstrates nothing either way.
+- **`hold` is still legal by construction.** `check_state_grounding` closes part
+  of the gap, but an agent that holds with vague reasoning remains unfalsifiable.
+  Middleware-Marcus held *more* than baseline-Marcus (193 vs 181), so an arm can
+  still improve its rate by trading less.
+
+---
+
+## 16. Run commands (run 04)
+
+```bash
+cd /workspace/Generative_agents
+git pull origin armaans-frontend
+cd reverie/backend_server
+
+# Independent arms, as before -- now with an explicit shared seed
+python trading_reverie.py --fork base_trading --sim run_mw_04   --steps 200 --seed 42 \
+  2>&1 | tee /workspace/run_mw_04.log
+python trading_reverie.py --fork base_trading --sim run_base_04 --steps 200 --seed 42 --no-middleware \
+  2>&1 | tee /workspace/run_base_04.log
+
+# The controlled comparison -- run BOTH directions
+python paired_eval.py --sim paired_04_mw   --steps 200 --seed 42 --advance-with middleware \
+  2>&1 | tee /workspace/paired_04_mw.log
+python paired_eval.py --sim paired_04_base --steps 200 --seed 42 --advance-with baseline \
+  2>&1 | tee /workspace/paired_04_base.log
+
+# Multiple seeds (the thing that actually makes a claim possible)
+for s in 42 43 44 45 46; do
+  python paired_eval.py --sim paired_s$s --steps 200 --seed $s --advance-with middleware \
+    2>&1 | tee /workspace/paired_s$s.log
+done
+```
+
+**Read in this order:**
+
+1. **`EXECUTED malformed`** — the headline. Middleware should be 0.
+2. **`caught before execution`** — proves the 0 is not vacuous.
+3. **`distinct episodes`** vs raw — if they diverge a lot, an agent is livelocked.
+4. **`State contradictions`** — the only number that scores HOLDs.
+5. **Discordant pairs** in the paired report — `baseline_only > middleware_only`
+   is the actual middleware effect.

@@ -50,7 +50,13 @@ Rules:
 - Use plain ASCII.
 """
 
-    raw = ollama_request(prompt, max_tokens=400, stop=["\n\n"], timeout=180)
+    # format="json" constrains decoding to valid JSON, the same way the
+    # decision call does; without it this parse depended on the model choosing
+    # to emit clean JSON. stop=["\n\n"] is deliberately NOT passed: pretty-
+    # printed JSON contains blank lines, so the sentinel truncated the response
+    # mid-object and the except-branch below silently substituted the canned
+    # fallback plan for every agent, every day.
+    raw = ollama_request(prompt, max_tokens=400, timeout=180, format="json")
     try:
         cleaned = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
         data = json.loads(cleaned)
@@ -65,8 +71,12 @@ Rules:
         schedule = _normalize_schedule(schedule)
         if daily_req and schedule:
             return {"daily_req": daily_req, "schedule": schedule}
-    except Exception:
-        pass
+    except Exception as exc:
+        # Report it. Silently falling back gave every agent the same canned
+        # plan below while the run looked healthy, which flattens the very
+        # persona differentiation the daily plan exists to create.
+        print(f"  [daily_plan] parse FAILED ({type(exc).__name__}: {exc}); "
+              f"using the generic fallback plan. Raw response: {raw[:200]!r}")
 
     # Fallback plan
     daily_req = [

@@ -87,6 +87,17 @@ class HistoricalMarketEnvironment(MarketEnvironment):
         #    while the market is open. Closed hours hold prices flat.
         if self.is_open:
             idx = self._bar_index
+            # Running past the end of the cached session silently holds every
+            # price flat, which looks identical to a genuinely quiet market. A
+            # run whose steps outlast its data produces agents reasoning about
+            # price action that is no longer moving, so say it once.
+            longest = max((len(s) for s in self.historical_prices.values()),
+                          default=0)
+            if idx >= longest and not getattr(self, "_exhausted_warned", False):
+                self._exhausted_warned = True
+                print(f"  [market] WARNING: replayed all {longest} cached bars "
+                      f"at step {self.step}; prices are now FROZEN for the rest "
+                      f"of the run. Shorten --steps or extend the cache.")
             for symbol in self.SYMBOLS:
                 series = self.historical_prices.get(symbol, [])
                 old = self.current_prices[symbol]

@@ -156,6 +156,49 @@ def _build_keywords(event) -> set:
     return kw
 
 
+def record_order_feedback(persona, market, description: str,
+                          poignancy: int = 6) -> None:
+    """
+    Store the outcome of a *failed or adjusted* order as an event in memory.
+
+    Without this, an agent whose order is rejected receives no signal that it
+    happened. Its cash and holdings are unchanged, so the next step rebuilds a
+    near-identical prompt and the model reproduces the same request. Measured
+    in run 03: Marcus Webb's cash sat at exactly $76.41 for 48 consecutive
+    steps while he re-requested `buy NVDA x10` on 20 of them, and 27 of the 44
+    recorded hallucinations were the same request repeated. Filtering an action
+    without reporting the rejection turns a one-off error into a livelock.
+
+    Deliberately called from BOTH arms -- the filtered arm on rejection, the
+    baseline arm on a clamped/partial fill. Feeding back only in the arm that
+    has a filter would hand that arm an extra faculty (learning from failed
+    actions) and stop the comparison being one-variable.
+
+    poignancy is kept below record_trade_fill()'s 7 so a rejection cannot
+    outrank an actual fill when the memory-compression budget evicts nodes.
+    """
+    if not description:
+        return
+
+    if description in persona.a_mem.embeddings:
+        emb = persona.a_mem.embeddings[description]
+    else:
+        emb = get_embedding(description)
+
+    persona.a_mem.add_event(
+        created=market.current_time,
+        expiration=None,
+        s=persona.name, p="order rejected", o=description,
+        description=description,
+        keywords={persona.name.lower(), "order", "rejected", "constraint"},
+        poignancy=poignancy,
+        embedding_pair=(description, emb),
+        filling=[],
+    )
+    persona.scratch.importance_trigger_curr -= poignancy
+    persona.scratch.importance_ele_n += 1
+
+
 def record_trade_fill(persona, market, fill: dict) -> None:
     """
     Store a completed trade fill as an event in the agent's memory.
