@@ -620,50 +620,147 @@ def execute_trading_action(persona: TradingPersona,
 # Stale-context hallucination detector
 # ===========================================================================
 
+# Generic market vocabulary. These words appear in headlines but carry no
+# reference to any *particular* headline, so matching on them measures how
+# much finance-flavoured prose the model produced, not what it was recalling.
+_NEWS_STOPWORDS = frozenset({
+    "about", "above", "after", "again", "against", "amid", "announces",
+    "before", "below", "beyond", "could", "during", "expected", "fears",
+    "files", "gains", "hikes", "maintains", "markets", "might", "opens",
+    "possible", "price", "prices", "raises", "raised", "rally", "reports",
+    "revenue", "sells", "shares", "share", "signals", "since", "stock",
+    "stocks", "still", "street", "target", "their", "there", "these",
+    "those", "under", "until", "where", "which", "while", "would",
+    "outlook", "quarter", "effective", "estimates", "beat", "broadly",
+    "supply", "deliveries", "safety", "filing", "print",
+})
+
+# How old a headline must be before citing it is even potentially stale.
+STALE_MIN_AGE_STEPS = 20
+# How many distinctive tokens from one headline the reasoning must contain
+# before we accept that it is referring to that specific headline.
+STALE_MIN_TOKEN_HITS = 2
+
+
+def _headline_tokens(headline: str) -> set:
+    return {w.strip(".,;:!?%$()[]").lower()
+            for w in headline.split()
+            if len(w.strip(".,;:!?%$()[]")) >= 5
+            and w.strip(".,;:!?%$()[]").isalpha()}
+
+
+def _distinctive_tokens(scripted_news: dict) -> dict:
+    """
+    step -> the tokens that appear in THAT headline and no other.
+
+    A token shared by two headlines cannot identify which one the agent meant,
+    and a token that is generic market vocabulary cannot identify a headline at
+    all. Both are excluded, so what remains is only text that pins the
+    reference to one specific event.
+    """
+    per_step = {step: _headline_tokens(h) - _NEWS_STOPWORDS
+                for step, (_sym, h, _imp) in scripted_news.items()}
+    counts = {}
+    for toks in per_step.values():
+        for t in toks:
+            counts[t] = counts.get(t, 0) + 1
+    return {step: {t for t in toks if counts[t] == 1}
+            for step, toks in per_step.items()}
+
+
 def _check_stale_reasoning(reasoning: str, current_step: int,
                             scripted_news: dict) -> str:
     """
-    Cheap heuristic: scan the LLM's reasoning for keywords from news headlines
-    that are more than 20 steps old AND have a contradicting headline at a
-    later step.  Returns a warning string if stale context is detected.
+    Detect reasoning that acts on a headline a later headline has superseded.
 
-    This is intentionally simple — it catches obvious cases like an agent
-    referencing 'earnings beat' (step 5 news) at step 50 when step 30
-    already fired contradicting supply-chain bad news.
+    REWRITTEN. The previous version split every headline into words longer than
+    5 characters and substring-scanned the reasoning for them, flagging a hit
+    whenever the same word appeared in the corpus with both a positive and a
+    negative impact. Across the whole 12-headline corpus exactly two words
+    satisfied that condition -- "supply" and "deliveries" -- so the metric was,
+    in effect, a counter for the word "supply". And "supply" is seeded into
+    Alex Chen's persona ("wants confirmation of supply tightening before
+    entering"), so restating his own standing thesis scored as a hallucination.
+    Measured consequences on run 05:
+
+      * "Price action reflects normal supply and demand balance" -> STALE,
+        despite no relation to any headline.
+      * "The market report does not confirm supply tightening" -> STALE,
+        despite the agent explicitly declining to act on the news.
+      * The same decision phrased concisely -> clean.
+
+    That last one is the fatal property: the score depended on reasoning
+    LENGTH. The middleware arm compresses context and produces ~790 chars per
+    decision against the baseline's ~5,070, so it scored 3.9% against 53.0%
+    for reasons that have nothing to do with grounding. The headline "5x stale
+    context reduction" was measuring verbosity.
+
+    This version requires all four of:
+      1. The cited headline is at least STALE_MIN_AGE_STEPS old.
+      2. A LATER headline for the SAME SYMBOL has the opposite impact sign,
+         i.e. the old one really was superseded rather than merely aged.
+      3. The reasoning names that symbol.
+      4. The reasoning contains at least STALE_MIN_TOKEN_HITS tokens that are
+         distinctive to that one headline -- not shared with another headline
+         and not generic market vocabulary.
+
+    (4) is what removes the length confound: distinctive tokens are rare, so
+    padding the reasoning with ordinary trading prose no longer raises the
+    score. A reasoning that cites the superseding headline's own distinctive
+    tokens is not stale by construction and is excluded.
+
+    Returns a description of the stale reference, or "" when there is none.
+    Macro headlines (symbol None) are skipped: they supersede nothing
+    ticker-specific and there is no symbol to require.
     """
     if not reasoning:
         return ""
 
-    reasoning_lower = reasoning.lower()
+    text = reasoning.lower()
+    distinctive = _distinctive_tokens(scripted_news)
+    warnings = []
 
-    # Build a map: keyword → [(step, is_positive)]
-    kw_map: dict = {}
-    for step, (symbol, headline, impact) in scripted_news.items():
-        is_positive = impact > 0
-        for word in headline.lower().split():
-            if len(word) > 5 and word.isalpha():
-                kw_map.setdefault(word, []).append((step, is_positive))
-
-    staleness_warnings = []
-    for word, appearances in kw_map.items():
-        if word not in reasoning_lower:
+    for step, (symbol, _headline, impact) in scripted_news.items():
+        if symbol is None:
             continue
-        for news_step, is_positive in appearances:
-            age = current_step - news_step
-            if age < 20:
-                continue
-            # Check if a contradicting event for the same keyword exists
-            # at a more recent step
-            for other_step, other_positive in appearances:
-                if other_step > news_step and other_positive != is_positive:
-                    if current_step - other_step < age:
-                        staleness_warnings.append(
-                            f"'{word}' (from step {news_step}, "
-                            f"{age} steps ago; contradicted at step {other_step})"
-                        )
-                        break
+        age = current_step - step
+        if age < STALE_MIN_AGE_STEPS:
+            continue
+        if symbol.lower() not in text:
+            continue
 
-    return "; ".join(staleness_warnings[:2]) if staleness_warnings else ""
+        hits = {t for t in distinctive.get(step, set()) if t in text}
+        if len(hits) < STALE_MIN_TOKEN_HITS:
+            continue
+
+        # Superseded? Same symbol, later step, opposite direction.
+        for other_step, (other_sym, _oh, other_impact) in scripted_news.items():
+            if other_sym != symbol or other_step <= step:
+                continue
+            # A headline that has not fired yet cannot have superseded
+            # anything. Without this, `current_step - other_step` goes negative
+            # and sails through the recency test below, so an agent at step 75
+            # was scored stale against news scheduled for step 100. The
+            # previous detector had the same hole.
+            if other_step > current_step:
+                continue
+            if (other_impact > 0) == (impact > 0):
+                continue
+            if current_step - other_step >= age:
+                continue
+            # Citing the newer headline too means the agent is not stuck on
+            # the old one.
+            # Substring, not text.split(): splitting leaves punctuation glued
+            # to the token ("overblown;"), so an agent that cited the newer
+            # headline mid-sentence was still scored stale.
+            if any(t in text for t in distinctive.get(other_step, set())):
+                continue
+            warnings.append(
+                f"{symbol}: cites step-{step} news ({age} steps old) via "
+                f"{sorted(hits)}; superseded at step {other_step}")
+            break
+
+    return "; ".join(warnings[:2]) if warnings else ""
 
 
 # ===========================================================================

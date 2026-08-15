@@ -231,5 +231,95 @@ class EvidenceIndexClamping(unittest.TestCase):
         self.assertEqual(["n0"], resolved)
 
 
+class StaleContextDetector(unittest.TestCase):
+    """
+    The old detector split headlines into words >5 chars and substring-scanned
+    the reasoning. Across the whole 12-headline corpus only "supply" and
+    "deliveries" could ever fire, and "supply" is seeded into Alex Chen's
+    persona -- so the metric counted a word, and scaled with reasoning length.
+    """
+
+    @staticmethod
+    def _news():
+        from market_environment import MarketEnvironment
+        return MarketEnvironment.SCRIPTED_NEWS
+
+    def _chk(self, text, step=75):
+        from trading_reverie import _check_stale_reasoning
+        return bool(_check_stale_reasoning(text, step, self._news()))
+
+    # ---- the false positives that broke run 05 -------------------------
+
+    def test_persona_language_is_not_stale(self):
+        """Alex's own scratch.json says he 'wants confirmation of supply
+        tightening'. Restating his standing thesis is character, not recall --
+        and he is explicitly declining to act on the news here."""
+        self.assertFalse(self._chk(
+            "The market report does not confirm supply tightening for AMD. Holding."))
+
+    def test_generic_market_vocabulary_is_not_stale(self):
+        self.assertFalse(self._chk(
+            "Price action reflects normal supply and demand balance; no edge here."))
+
+    def test_score_is_invariant_to_reasoning_length(self):
+        """The fatal property of the old detector: the middleware arm scored
+        3.9% against the baseline's 53.0% while producing ~790 chars per
+        decision against ~5,070. Verbosity must not move this metric."""
+        filler = ("Holding NVDA. Supply conditions and revenue estimates remain "
+                  "in focus; sentiment is mixed and analyst targets unchanged. ")
+        for n in (1, 8, 32):
+            self.assertFalse(self._chk(filler * n), f"fired at {len(filler*n)} chars")
+
+    # ---- the true positives it must still catch ------------------------
+
+    def test_citing_a_superseded_headline_is_stale(self):
+        self.assertTrue(self._chk(
+            "NVDA still faces the critical Taiwan fab bottleneck, so I am selling."))
+
+    def test_citing_the_superseding_headline_too_is_not_stale(self):
+        """An agent that names the newer headline is not stuck on the old one."""
+        self.assertFalse(self._chk(
+            "NVDA Taiwan bottleneck was critical but Goldman Sachs calls it "
+            "overblown; buying."))
+
+    # ---- the guards --------------------------------------------------
+
+    def test_one_distinctive_token_is_not_enough(self):
+        """A single shared word cannot pin the reference to one headline."""
+        self.assertFalse(self._chk("NVDA had a bottleneck earlier; buying anyway."))
+
+    def test_symbol_must_match(self):
+        self.assertFalse(self._chk(
+            "Taiwan bottleneck was critical for the sector; buying AAPL."))
+
+    def test_recent_news_is_not_stale(self):
+        self.assertFalse(self._chk(
+            "NVDA still faces the critical Taiwan fab bottleneck.", step=35))
+
+    def test_not_stale_until_actually_superseded(self):
+        """Step 55: the step-30 bad news is old, but the step-70 correction
+        has not fired yet, so nothing has superseded it."""
+        self.assertFalse(self._chk(
+            "NVDA still faces the critical Taiwan fab bottleneck.", step=55))
+
+    def test_future_news_cannot_supersede(self):
+        """current_step - other_step goes negative for a headline that has not
+        fired, which sailed through the recency test: an agent at step 75 was
+        scored stale against news scheduled for step 100."""
+        from trading_reverie import _check_stale_reasoning
+        news = {30: ("NVDA", "NVDA Taiwan fab critical bottleneck", -0.06),
+                100: ("NVDA", "NVIDIA announces stock split", 0.07)}
+        self.assertEqual("", _check_stale_reasoning(
+            "NVDA still faces the critical Taiwan fab bottleneck.", 75, news))
+
+    def test_generic_words_are_not_distinctive(self):
+        from trading_reverie import _distinctive_tokens
+        d = _distinctive_tokens(self._news())
+        every = set().union(*d.values())
+        for word in ("supply", "deliveries", "revenue", "estimates", "shares"):
+            self.assertNotIn(word, every,
+                             f"{word!r} is generic market vocabulary")
+
+
 if __name__ == "__main__":
     unittest.main()
