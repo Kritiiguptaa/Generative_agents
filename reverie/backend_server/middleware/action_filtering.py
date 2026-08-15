@@ -501,6 +501,20 @@ def run_action_filtering_step(
 	retry_prompt = prompt + f"\n\nValidation error: {error}. Try again."
 	retry_text = llm_call(retry_prompt)
 	retry_response, retry_error = validate_response(retry_text, legal_actions)
+
+	# When the FIRST attempt was unparseable, describe_request() returned
+	# {"action": None, ...}, but illegal_request below is still allowed to fire
+	# on the retry. _generate_report() takes its numerator from illegal_request
+	# and its denominator from stats["requested"], so an unparseable-then-illegal
+	# step incremented the numerator and never the denominator. Run 04 reported
+	# Alex Chen at 48 hallucinations against 33 attempts (145.5%) -- his
+	# trade_attempts exactly equalled his executed buy+sell, i.e. not one of the
+	# 48 was counted. Adopt the retry's request when the first yielded none.
+	if not requested.get("action"):
+		retry_requested = describe_request(retry_text)
+		if retry_requested.get("action"):
+			stats["requested"] = requested = retry_requested
+
 	if retry_response is not None:
 		log_action(log_path, _get_agent_name(agent_state), retry_response, "retry",
 		           error, requested=requested)
