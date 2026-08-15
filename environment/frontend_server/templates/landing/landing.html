@@ -1,10 +1,60 @@
-{% extends "base.html" %}
+<!DOCTYPE html>
 {% load staticfiles %}
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Agent Anchor</title>
+	<link rel="stylesheet" href="{% static 'css/trading_ui.css' %}">
+</head>
+<body>
 
-{% block content %}
-<div style="padding:2em">
-<img src="{% static 'img/atlas.png' %}">
-Your environment server is up and running! 
+<div class="topbar">
+	<div class="brand">Agent<span>Anchor</span></div>
+	<div class="chip">frontend server</div>
+	<div class="spacer"></div>
+	<div class="chip">{{ sims|length }} simulation{{ sims|length|pluralize }}</div>
 </div>
-{% endblock content %}
 
+<div class="wrap" style="grid-template-columns: minmax(0, 1fr);">
+	<div class="panel">
+		<div class="panel-head"><span>Simulations</span></div>
+		<div class="log-scroll" style="max-height:none;">
+			<table class="log">
+				<thead>
+					<tr>
+						<th>Sim code</th>
+						<th style="width:260px">Agents</th>
+						<th style="width:80px" class="num">Steps</th>
+						<th style="width:100px" class="num">Decisions</th>
+						<th style="width:90px">State</th>
+						<th style="width:80px"></th>
+					</tr>
+				</thead>
+				<tbody>
+				{% for s in sims %}
+					<tr onclick="location.href='/map/{{ s.sim_code }}/0/'">
+						<td style="color:var(--text)">{{ s.sim_code }}</td>
+						<td>{{ s.personas|join:", " }}</td>
+						<td class="num">{{ s.steps }}</td>
+						<td class="num">{{ s.decisions }}</td>
+						<td>
+							{% if s.is_running %}<span class="badge retry">running</span>
+							{% elif s.decisions %}<span class="badge success">done</span>
+							{% else %}<span class="badge unknown">no data</span>{% endif %}
+						</td>
+						<td><a href="/map/{{ s.sim_code }}/0/">map ↗</a></td>
+					</tr>
+				{% empty %}
+					<tr><td colspan="6" style="color:var(--text-faint); font-style:italic;">
+						Nothing in <code>storage/</code> with a <code>reverie/meta.json</code> yet.
+					</td></tr>
+				{% endfor %}
+				</tbody>
+			</table>
+		</div>
+	</div>
+</div>
+
+</body>
+</html>

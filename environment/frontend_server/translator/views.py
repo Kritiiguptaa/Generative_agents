@@ -75,8 +75,35 @@ def _split_associative_memory(associative):
 
   return a_mem_event, a_mem_chat, a_mem_thought
 
-def landing(request): 
-  context = {}
+def landing(request):
+  """
+  Index of every sim in storage/ that actually has trading data, so the map
+  view is reachable without hand-typing a sim_code into the URL. A directory
+  only lists if reverie/meta.json exists -- the Smallville storage dirs and
+  half-created folders sitting alongside the trading runs would otherwise
+  render as dead links.
+  """
+  sims = []
+  if os.path.isdir(sim_data.STORAGE_ROOT):
+    for name in sorted(os.listdir(sim_data.STORAGE_ROOT)):
+      meta = sim_data.load_meta(name)
+      if not meta:
+        continue
+      status = sim_data.load_run_status(name)
+      log = sim_data.load_trading_log(name)
+      # Trading sims are the ones with trading personas; a Smallville sim has
+      # meta.json too, so the presence of a decision log is what separates them.
+      sims += [{
+        "sim_code": name,
+        "personas": meta.get("persona_names", []),
+        "steps": status["current_step"],
+        "decisions": len(log),
+        "is_running": status["is_running"],
+        "is_trading": bool(log) or bool(
+          set(meta.get("persona_names", [])) & set(sim_data.DESK_TILES)),
+      }]
+  sims.sort(key=lambda s: (not s["is_trading"], -s["decisions"], s["sim_code"]))
+  context = {"sims": sims}
   template = "landing/landing.html"
   return render(request, template, context)
 

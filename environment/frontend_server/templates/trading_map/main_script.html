@@ -1,24 +1,25 @@
 {% load staticfiles %}
 <script type="text/javascript">
 	/*
-	  Trading-floor Phaser engine. Adapted from templates/demo/main_script.html.
-	  trading_reverie.py never rewrites environment/{step}.json, so there's no
-	  raw per-step (x,y) from the backend -- but translator/sim_data.py derives
-	  a real one from the actual decision: BUY/SELL sends an agent to the
-	  MARKET_BOARD_TILE for that step, HOLD keeps them at their desk. That's
-	  what's walked here, pixel by pixel, same interpolation style the
-	  original engine uses.
+	  Trading-floor Phaser engine + page controller.
 
-	  LIVE MODE: unlike demo()'s bulk preload, this page starts with an empty
-	  all_movement and fetches from trading_poll()/ on an interval (see
-	  poll_for_updates() below) -- the same AJAX-polling shape home/main_script.html
-	  uses for a truly live sim, adapted to read through sim_data.py instead of
-	  the raw movement/{step}.json files home mode reads. While trading_reverie.py
-	  is still writing new steps (meta.json's sim_running flag), each poll picks
-	  up whatever's new and the walk animation advances into it automatically;
-	  once the backend finishes, one more poll confirms sim_running=false and
-	  polling stops -- everything already on screen just keeps working as a
-	  normal finished replay.
+	  Movement source: trading_reverie.py never rewrites environment/{step}.json,
+	  so there's no raw per-step (x,y) from the backend -- translator/sim_data.py
+	  derives one from the actual decision (BUY/SELL walks the agent to the
+	  market board, HOLD keeps them at their desk, a real peer interaction sends
+	  both parties out to the meeting aisle). That's what's walked here, tile by
+	  tile, around the office furniture via BFS over the map's own Collisions
+	  layer.
+
+	  LIVE MODE: starts with an empty all_movement and fetches from
+	  trading_poll() every POLL_INTERVAL_MS while meta.json's sim_running flag
+	  is set. Once the backend finishes, one last poll flips the badge and
+	  polling stops -- what's on screen keeps working as a normal replay.
+
+	  RENDERING: the office is 44x32 @16px = 704x512. That is small on a modern
+	  display, so the canvas is the full map at 2x (1408x1024) with the camera
+	  zoomed to match, then CSS-scaled down to the column width with
+	  image-rendering:pixelated. Crisp at any width, whole floor always visible.
 	*/
 
 	let sim_code = "{{ sim_code }}";
@@ -26,6 +27,7 @@
 	let max_step = 0;
 	let sec_per_step = {{ sec_per_step }};
 	let persona_init_pos = {{ persona_init_pos|safe }};
+	let persona_snippets = {{ persona_snippets|safe }};
 	let all_movement = {};
 	let market_prices_by_step = {};
 	let interactions_by_step = {};
@@ -33,35 +35,42 @@
 	let market_board_tile = {{ market_board_tile|safe }};
 	let start_datetime = new Date(Date.parse("{{ start_datetime }}"));
 
-	const STATUS_COLORS = {success: "#3c763d", retry: "#8a6d3b", fallback: "#a94442", hallucination: "#a94442", unknown: "#777777"};
-	const STATUS_BG = {success: "#dff0d8", retry: "#fcf8e3", fallback: "#f2dede", hallucination: "#f2dede", unknown: "#eeeeee"};
 	const POLL_INTERVAL_MS = 4000;
+	const STEP_MS = 1600;
+
+	// Map geometry -- office.json is 44x32 tiles at 16px.
+	const TILE = 16;
+	const MAP_W_TILES = 44, MAP_H_TILES = 32;
+	const ZOOM = 2;
 
 	const config = {
 	  type: Phaser.AUTO,
-	  width: 900,
-	  height: 560,
+	  width: MAP_W_TILES * TILE * ZOOM,
+	  height: MAP_H_TILES * TILE * ZOOM,
 	  parent: "game-container",
 	  pixelArt: true,
+	  backgroundColor: "#0b0e14",
 	  physics: {default: "arcade", arcade: {gravity: {y: 0}}},
 	  scene: {preload: preload, create: create, update: update}
-	  // No scale.zoom -- the office map is 44x32 @16px (704x512), which fits
-	  // the canvas at native resolution. Camera zoom is set in create().
 	};
 	const game = new Phaser.Game(config);
 
 	let personas = {};
 	let pronunciatios = {};
-	let speech_bubbles = {};
-	let chat_texts = {};
+	let chat_bubbles = {};      // {bg, text} -- only shown during a real interaction
+	let name_plates = {};
+	let plate_offset = {};      // per-agent nameplate dy, staggered in create()
+	let select_ring = null;
 	let movement_target = {};   // per-agent goal tile [tx, ty]
 	let movement_path = {};     // per-agent remaining waypoints, in tiles
 	let current_tile = {};      // per-agent logical tile (authoritative for pathing)
 	let last_facing = {};
 	let walkable = null;        // [y][x] bool, built from the map's Collisions layer
 	let map_w = 0, map_h = 0;
-	const tile_width = 16;      // office.json is a 16px-tile map
-	const movement_speed = 2;   // px/frame
+	const movement_speed = 2;   // px/frame, in map (unzoomed) pixels
+
+	let selected_key = null;
+	let log_filter = null;      // underscore key, or null for "all agents"
 
 	function preload() {
 	  this.load.crossOrigin = '';
@@ -80,8 +89,6 @@
 			  										  		     "{% static 'assets/characters/atlas.json' %}");
 			{% endwith %}
 	  {% endfor %}
-
-	  this.load.image('speech_bubble', "{% static 'assets/speech_bubble/v3.png' %}");
 	}
 
 	function create() {
@@ -98,14 +105,12 @@
 	  map.createLayer("Furniture L1", all_tilesets, 0, 0);
 	  map.createLayer("Furniture L2", all_tilesets, 0, 0);
 	  const foregroundL1Layer = map.createLayer("Foreground L1", all_tilesets, 0, 0);
-	  foregroundL1Layer.setDepth(2);
+	  foregroundL1Layer.setDepth(4);
 	  // The blocks layers (Collisions, Arena/Sector/World/Spawning) are
-	  // authoring metadata, not scenery -- never rendered. Collisions is read
-	  // below purely as the walkability source for pathfinding.
+	  // authoring metadata painted with solid colour swatches, not scenery --
+	  // never rendered. Collisions is read below purely as the walkability
+	  // source for pathfinding.
 
-	  // Walkability grid straight from the map's own Collisions layer, so
-	  // pathfinding agrees with the map by construction rather than by a
-	  // hand-maintained copy. A non-empty tile there means blocked.
 	  map_w = map.width;
 	  map_h = map.height;
 	  const coll = map.getLayer("Collisions").data;
@@ -119,60 +124,79 @@
 	    walkable.push(row);
 	  }
 
-	  // Whole office fits the canvas at native res -- show all of it rather
-	  // than following one agent, since the point is watching all three move.
+	  // Whole floor at 2x, no scrolling -- the point is watching all three at once.
 	  const camera = this.cameras.main;
-	  camera.setZoom(1);
+	  camera.setZoom(ZOOM);
 	  camera.centerOn(map.widthInPixels / 2, map.heightInPixels / 2);
 
 	  // Label the presentation-screen bank agents walk to on a real BUY/SELL
 	  // (game object 32147 in the map's matrix; see sim_data.MARKET_BOARD_TILE).
 	  const board_px = tile_to_px(market_board_tile[0], market_board_tile[1]);
-	  this.add.text(board_px[0], board_px[1] - 34, "📈 MARKET BOARD", {
-	    font: "8px monospace", fill: "#ffffff", backgroundColor: "#111111",
-	    padding: {x: 3, y: 2}
-	  }).setOrigin(0.5, 0).setDepth(4);
+	  this.add.text(board_px[0], board_px[1] - 30, "MARKET BOARD", {
+	    fontFamily: "monospace", fontSize: "7px", color: "#0b0e14",
+	    backgroundColor: "#4d9fff", padding: {x: 3, y: 2}
+	  }).setOrigin(0.5, 0).setDepth(5).setResolution(3);
+
+	  // Selection ring, parked off-screen until a card is clicked.
+	  select_ring = this.add.circle(-100, -100, 10);
+	  select_ring.setStrokeStyle(1.5, 0x4d9fff, 0.9);
+	  select_ring.setDepth(1);
 
 	  const anims = this.anims;
+	  let agent_index = 0;
 	  for (const key in persona_init_pos) {
-	    // Starting tile: wherever this agent's real record says they are at
-	    // the initial step (desk or market board). Nothing has been polled
-	    // yet at this point, so this falls back to the desk position until
-	    // the first poll response lands -- not a fake walk-in.
+	    // Nameplates are staggered vertically by agent so that two people
+	    // standing on adjacent tiles (routine at the market board, where
+	    // sim_data spreads simultaneous traders along one row) don't overprint
+	    // each other into an unreadable "Marcus Sara Kim".
+	    const plate_dy = 2 + (agent_index % 3) * 7;
+	    plate_offset[key] = plate_dy;
+	    agent_index += 1;
+	    // Starting tile: wherever this agent's real record says they are at the
+	    // initial step. Nothing has been polled yet, so this falls back to the
+	    // desk position until the first poll lands -- not a fake walk-in.
 	    const initial_rec = get_record(step, key);
 	    const pos = initial_rec ? initial_rec.movement : persona_init_pos[key];
 	    const start_px = tile_to_px(pos[0], pos[1]);
 	    const start_x = start_px[0], start_y = start_px[1];
 
 	    const sprite = this.add.sprite(start_x, start_y, key, "down");
-	    sprite.displayWidth = 22;   // sized for this map's 16px tiles
+	    sprite.displayWidth = 20;   // sized for this map's 16px tiles
 	    sprite.scaleY = sprite.scaleX;
-	    sprite.setDepth(1);
+	    sprite.setDepth(2);
 	    personas[key] = sprite;
 	    current_tile[key] = [pos[0], pos[1]];
 	    movement_target[key] = [pos[0], pos[1]];
 	    movement_path[key] = [];
 	    last_facing[key] = "down";
 
-	    speech_bubbles[key] = this.add.image(start_x, start_y - 30, 'speech_bubble').setDepth(3);
-	    speech_bubbles[key].displayWidth = 130;
-	    speech_bubbles[key].displayHeight = 58;
+	    // Small nameplate so you can tell who's who at a glance without
+	    // memorising three near-identical 16px sprites.
+	    name_plates[key] = this.add.text(start_x, start_y + plate_dy, key.replace(/_/g, " "), {
+	      fontFamily: "monospace", fontSize: "6px", color: "#d6dbe5",
+	      backgroundColor: "#0b0e14cc", padding: {x: 2, y: 1}
+	    }).setOrigin(0.5, 0).setDepth(3).setResolution(3);
 
-	    pronunciatios[key] = this.add.text(start_x - 6, start_y - 46, "✉", {
-	      font: "20px monospace", fill: "#000000", padding: {x: 6, y: 6}
-	    }).setDepth(3);
+	    // Action emoji above the head. 11px at 2x zoom reads clearly without
+	    // swamping a 16px tile (the old 20px glyph covered most of a desk).
+	    pronunciatios[key] = this.add.text(start_x, start_y - 22, "", {
+	      fontFamily: "monospace", fontSize: "11px"
+	    }).setOrigin(0.5, 0.5).setDepth(3);
 
 	    // Real peer-conversation text (trading_interactions.py's LLM-generated
-	    // summary). Hidden unless this agent is actually in an interaction on
-	    // the current step -- see render_step().
-	    chat_texts[key] = this.add.text(start_x, start_y - 62, "", {
-	      font: "7px monospace", fill: "#ffffff", backgroundColor: "#222222",
-	      padding: {x: 3, y: 2}, align: "center",
-	      wordWrap: {width: 150, useAdvancedWrap: true}
-	    }).setOrigin(0.5, 1).setDepth(5);
-	    chat_texts[key].visible = false;
+	    // summary). Created hidden and only shown on steps where this agent is
+	    // genuinely in an interaction -- see render_step(). The old build left
+	    // a 130x58px speech-bubble image permanently visible over every agent,
+	    // which on a 704px-wide map covered a fifth of the office at all times.
+	    const bubble_text = this.add.text(start_x, start_y - 32, "", {
+	      fontFamily: "monospace", fontSize: "6px", color: "#d6dbe5",
+	      backgroundColor: "#141922ee", padding: {x: 4, y: 3}, align: "center",
+	      wordWrap: {width: 120, useAdvancedWrap: true}
+	    }).setOrigin(0.5, 1).setDepth(6).setResolution(3);
+	    bubble_text.visible = false;
+	    chat_bubbles[key] = bubble_text;
 
-	    // Walk-cycle anims, same atlas frame names demo/main_script.html uses
+	    // Walk-cycle anims, same atlas frame names the original engine uses
 	    // (left-walk.000..003, etc, defined once for all personas in
 	    // characters/atlas.json).
 	    anims.create({key: key + "-left-walk", frames: anims.generateFrameNames(key, {prefix: "left-walk.", start: 0, end: 3, zeroPad: 3}), frameRate: 8, repeat: -1});
@@ -182,21 +206,18 @@
 	  }
 
 	  render_step(step);
-	  // No preloaded data to auto-play yet -- poll_for_updates() (kicked off
-	  // on DOMContentLoaded, below) calls play_replay() itself the moment the
-	  // first real step arrives.
 	}
 
 	// ###########################################################################
 	// PATHFINDING -- the office has real furniture, so agents walk around it
-	// rather than through it. Breadth-first search over the map's own
-	// Collisions layer gives the shortest 4-directional route; update() then
-	// walks the returned waypoints one tile at a time.
+	// rather than through it. Breadth-first search over the map's own Collisions
+	// layer gives the shortest 4-directional route; update() then walks the
+	// returned waypoints one tile at a time.
 	// ###########################################################################
 
 	function tile_to_px(tx, ty) {
 	  // x centred in the tile, y at its bottom edge (the sprite's feet).
-	  return [tx * tile_width + tile_width / 2, ty * tile_width + tile_width];
+	  return [tx * TILE + TILE / 2, ty * TILE + TILE];
 	}
 
 	function is_walkable(x, y) {
@@ -275,20 +296,50 @@
 	      sprite.setTexture(key, last_facing[key]);
 	    }
 
-	    pronunciatios[key].x = sprite.x - 6;
-	    pronunciatios[key].y = sprite.y - 30;
-	    speech_bubbles[key].x = sprite.x;
-	    speech_bubbles[key].y = sprite.y - 20;
-	    chat_texts[key].x = sprite.x;
-	    chat_texts[key].y = sprite.y - 34;
+	    pronunciatios[key].x = sprite.x;
+	    pronunciatios[key].y = sprite.y - 22;
+	    name_plates[key].x = sprite.x;
+	    name_plates[key].y = sprite.y + plate_offset[key];
+	    chat_bubbles[key].x = sprite.x;
+	    chat_bubbles[key].y = sprite.y - 30;
+	  }
+
+	  if (select_ring && selected_key && personas[selected_key]) {
+	    select_ring.x = personas[selected_key].x;
+	    select_ring.y = personas[selected_key].y - 8;
 	  }
 	}
 
 	// ###########################################################################
-	// SCRUBBER -- render_step() sets each agent's target tile + refreshes the
-	// text/badge panels; update() (above) walks sprites toward that target
-	// pixel-by-pixel every frame, independent of how often render_step() fires.
+	// PAGE RENDERING
 	// ###########################################################################
+
+	function el(id) { return document.getElementById(id); }
+	function esc(s) {
+	  return String(s == null ? "" : s)
+	    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+	}
+	function money(v) {
+	  return v == null ? "—" : "$" + Number(v).toLocaleString(undefined, {maximumFractionDigits: 0});
+	}
+	function positions_str(positions) {
+	  const parts = [];
+	  for (const sym in (positions || {})) parts.push(sym + "×" + positions[sym].qty);
+	  return parts.length ? parts.join(" ") : "flat";
+	}
+	function action_kind(rec) {
+	  const d = (rec && rec.description) || "";
+	  if (d.startsWith("BUY")) return "buy";
+	  if (d.startsWith("SELL")) return "sell";
+	  return "hold";
+	}
+	function badge_html(rec) {
+	  const status = (rec && rec.status) || "unknown";
+	  let label = status;
+	  if (rec && rec.error_reason) label += " · " + rec.error_reason;
+	  if (rec && rec.hallucination) label += " · filtered";
+	  return '<span class="badge ' + esc(status) + '">' + esc(label) + "</span>";
+	}
 
 	function get_record(target_step, underscore_key) {
 	  const full_name = underscore_key.replace(/_/g, " ");
@@ -299,133 +350,243 @@
 	  return null;
 	}
 
-	function render_step(s) {
-	  step = Math.max(0, Math.min(max_step, s));
-	  document.getElementById("step-content").innerHTML = step;
-	  document.getElementById("step_slider").value = step;
-
-	  const dt = new Date(start_datetime.getTime() + step * sec_per_step * 1000);
-	  document.getElementById("game-time-content").innerHTML = dt.toLocaleString(
-	    "en-US", {weekday: 'short', hour: '2-digit', minute: '2-digit'});
-
+	function render_ticker() {
 	  const prices = market_prices_by_step[step] || {};
-	  const price_parts = [];
-	  for (const sym in prices) price_parts.push(sym + ": $" + Number(prices[sym]).toFixed(2));
-	  document.getElementById("market_ticker").innerHTML =
-	    price_parts.length ? price_parts.join(" &nbsp;|&nbsp; ") : "no market data for this step";
+	  const prev = market_prices_by_step[step - 1] || {};
+	  const parts = ['<div class="label">Market</div>'];
+	  for (const sym in prices) {
+	    const px = Number(prices[sym]);
+	    const was = prev[sym] != null ? Number(prev[sym]) : null;
+	    let cls = "", delta = "";
+	    if (was != null && was !== 0) {
+	      const d = px - was;
+	      cls = d > 0 ? " up" : (d < 0 ? " down" : "");
+	      if (d !== 0) {
+	        delta = '<span class="delta">' + (d > 0 ? "▲" : "▼") +
+	                Math.abs(d / was * 100).toFixed(2) + "%</span>";
+	      }
+	    }
+	    parts.push('<div class="tick' + cls + '"><span class="sym">' + esc(sym) +
+	               '</span><span class="px">' + px.toFixed(2) + "</span>" + delta + "</div>");
+	  }
+	  if (Object.keys(prices).length === 0) {
+	    parts.push('<div class="tick"><span class="sym">no market data for this step</span></div>');
+	  }
+	  el("market_ticker").innerHTML = parts.join("");
+	}
 
-	  // Real peer interaction banner -- trading_interactions.py fires one every
-	  // 12 steps and has the LLM generate an actual exchange between two agents.
+	function render_interaction() {
 	  const interaction = interactions_by_step[step];
-	  const banner = document.getElementById("interaction_banner");
-	  if (banner) {
-	    if (interaction) {
-	      banner.style.display = "block";
-	      banner.innerHTML =
-	        "<strong>&#128172; " + (interaction.agents || []).join(" &amp; ") + "</strong> &mdash; " +
-	        "<em>" + (interaction.topic || "") + "</em><br>" +
-	        (interaction.summary || "") +
-	        (interaction.follow_up ? "<br><small><strong>Follow-up:</strong> " + interaction.follow_up + "</small>" : "");
+	  const banner = el("interaction_banner");
+	  if (!banner) return;
+	  if (!interaction) { banner.style.display = "none"; return; }
+	  banner.style.display = "block";
+	  banner.innerHTML =
+	    '<span class="who">💬 ' + esc((interaction.agents || []).join(" & ")) + "</span> — " +
+	    '<span class="topic">' + esc(interaction.topic || "") + "</span><br>" +
+	    esc(interaction.summary || "") +
+	    (interaction.follow_up
+	      ? '<span class="follow">Follow-up: ' + esc(interaction.follow_up) + "</span>"
+	      : "");
+	}
+
+	function render_detail() {
+	  const body = el("detail_body");
+	  const title = el("detail_title");
+	  const badge = el("detail_badge");
+	  const link = el("detail_state_link");
+
+	  if (!selected_key) {
+	    title.textContent = "Agent Detail";
+	    badge.innerHTML = "";
+	    link.style.display = "none";
+	    body.innerHTML = '<div class="detail-empty">Select an agent to see their action, ' +
+	      "reasoning, and what <code>action_filtering.py</code> did with it.</div>";
+	    return;
+	  }
+
+	  const name = selected_key.replace(/_/g, " ");
+	  const rec = get_record(step, selected_key);
+	  const snip = persona_snippets[selected_key] || {};
+
+	  title.textContent = name;
+	  link.style.display = "";
+	  link.setAttribute("href", "/trading_persona_state/" + sim_code + "/" + step + "/" + selected_key + "/");
+
+	  if (!rec) {
+	    badge.innerHTML = "";
+	    body.innerHTML = '<div class="detail-empty">No data yet for step ' + step + ".</div>";
+	    return;
+	  }
+
+	  badge.innerHTML = badge_html(rec);
+
+	  const bits = [];
+	  bits.push('<div class="detail-row"><div class="detail-label">Current action</div>' +
+	    '<div class="agent-action ' + action_kind(rec) + '" style="margin-top:0">' +
+	    esc(rec.description) + (rec.outcome ? ' <span style="color:var(--text-faint); font-size:13px;">— ' +
+	    esc(rec.outcome) + "</span>" : "") + "</div></div>");
+
+	  bits.push('<div class="detail-row"><div class="detail-label">Reasoning (verbatim from the model)</div>' +
+	    '<div class="detail-reasoning">' + (rec.reasoning ? esc(rec.reasoning) : "none given") + "</div></div>");
+
+	  bits.push('<div class="detail-row"><div class="kv">' +
+	    '<div><div class="k">Portfolio</div><div class="v">' + money(rec.portfolio_value) + "</div></div>" +
+	    '<div><div class="k">Cash</div><div class="v">' + money(rec.cash) + "</div></div>" +
+	    '<div><div class="k">Positions</div><div class="v">' + esc(positions_str(rec.positions)) + "</div></div>" +
+	    (rec.stale_context != null
+	      ? '<div><div class="k">Stale context</div><div class="v">' + esc(rec.stale_context) + "</div></div>" : "") +
+	    (rec.persona_drift_score != null
+	      ? '<div><div class="k">Persona drift</div><div class="v">' +
+        Number(rec.persona_drift_score).toFixed(2) + "</div></div>" : "") +
+	    "</div></div>");
+
+	  if (snip.trading_strategy || snip.innate) {
+	    bits.push('<div class="detail-row"><div class="detail-label">Persona</div>' +
+	      '<div class="detail-reasoning">' +
+	      esc([snip.trader_type, snip.risk_tolerance ? "risk: " + snip.risk_tolerance : ""]
+	          .filter(Boolean).join(" · ")) +
+	      (snip.trading_strategy ? "\n" + esc(snip.trading_strategy) : "") +
+	      (snip.innate ? "\n" + esc(snip.innate) : "") + "</div></div>");
+	  }
+
+	  body.innerHTML = bits.join("");
+	}
+
+	function render_cards() {
+	  for (const key in personas) {
+	    const rec = get_record(step, key);
+	    const emoji_el = el("quick_emoji-" + key);
+	    if (emoji_el) emoji_el.textContent = rec ? rec.pronunciatio : "…";
+
+	    const action_el = el("card_action-" + key);
+	    const badge_el = el("card_badge-" + key);
+	    const pv_el = el("card_pv-" + key);
+	    const cash_el = el("card_cash-" + key);
+	    const pos_el = el("card_pos-" + key);
+	    if (!action_el) continue;
+
+	    if (rec) {
+	      action_el.textContent = rec.description;
+	      action_el.className = "agent-action " + action_kind(rec);
+	      badge_el.innerHTML = badge_html(rec);
+	      pv_el.textContent = money(rec.portfolio_value);
+	      cash_el.textContent = money(rec.cash);
+	      pos_el.textContent = positions_str(rec.positions);
 	    } else {
-	      banner.style.display = "none";
+	      action_el.textContent = "—";
+	      action_el.className = "agent-action hold";
+	      badge_el.innerHTML = "";
+	      pv_el.textContent = cash_el.textContent = pos_el.textContent = "—";
 	    }
 	  }
+	}
+
+	function render_log() {
+	  const rows = [];
+	  const steps = Object.keys(all_movement).map(Number).sort((a, b) => a - b);
+	  for (const s of steps) {
+	    const bucket = all_movement[s];
+	    for (const name of Object.keys(bucket).sort()) {
+	      const key = name.replace(/ /g, "_");
+	      if (log_filter && key !== log_filter) continue;
+	      const rec = bucket[name];
+	      rows.push(
+	        '<tr data-step="' + s + '"' + (s === step ? ' class="current"' : "") + ">" +
+	        "<td>" + s + "</td>" +
+	        "<td>" + esc(name) + "</td>" +
+	        '<td class="act ' + action_kind(rec) + '">' + esc(rec.description) + "</td>" +
+	        '<td class="num">' + money(rec.portfolio_value) + "</td>" +
+	        "<td>" + badge_html(rec) + "</td>" +
+	        '<td class="why" title="' + esc(rec.reasoning || "") + '">' +
+	        esc(rec.reasoning || "—") + "</td></tr>");
+	    }
+	  }
+	  const body = el("log_body");
+	  body.innerHTML = rows.length
+	    ? rows.join("")
+	    : '<tr><td colspan="6" style="color:var(--text-faint); font-style:italic;">no decisions logged yet</td></tr>';
+
+	  for (const tr of body.querySelectorAll("tr[data-step]")) {
+	    tr.onclick = function () { pause_replay(); render_step(parseInt(this.dataset.step, 10)); };
+	  }
+	  // Keep the current step visible inside the log pane WITHOUT using
+	  // scrollIntoView: that walks every scrollable ancestor including the
+	  // document, so each playback tick yanked the whole page down past the
+	  // ticker and clipped the first agent card under the sticky topbar.
+	  // Scroll only the pane, and only when the row is actually out of view.
+	  const cur = body.querySelector("tr.current");
+	  const pane = body.closest(".log-scroll");
+	  if (cur && pane) {
+	    const top = cur.offsetTop, bottom = top + cur.offsetHeight;
+	    if (top < pane.scrollTop) pane.scrollTop = top;
+	    else if (bottom > pane.scrollTop + pane.clientHeight) {
+	      pane.scrollTop = bottom - pane.clientHeight;
+	    }
+	  }
+	}
+
+	function render_step(s) {
+	  step = Math.max(0, Math.min(max_step, s));
+	  el("step-content").textContent = step;
+	  el("step_slider").value = step;
+
+	  const dt = new Date(start_datetime.getTime() + step * sec_per_step * 1000);
+	  el("game-time-content").textContent = dt.toLocaleString(
+	    "en-US", {weekday: "short", hour: "2-digit", minute: "2-digit"});
+
+	  render_ticker();
+	  render_interaction();
 
 	  for (const key in personas) {
 	    const rec = get_record(step, key);
+	    if (rec && rec.movement) set_target(key, rec.movement);
+	    if (pronunciatios[key]) pronunciatios[key].setText(rec ? rec.pronunciatio : "");
 
-	    if (rec && rec.movement) {
-	      set_target(key, rec.movement);
-	    }
-
-	    const icon = rec ? rec.pronunciatio : "…";
-	    if (pronunciatios[key]) pronunciatios[key].setText(icon);
-
-	    // Show the actual conversation text over an agent's head only on the
-	    // steps they're really in an interaction.
-	    if (chat_texts[key]) {
-	      if (rec && rec.chat) {
-	        chat_texts[key].setText(rec.chat);
-	        chat_texts[key].visible = true;
-	      } else {
-	        chat_texts[key].visible = false;
-	      }
-	    }
-	    const quick_emoji_el = document.getElementById("quick_emoji-" + key);
-	    if (quick_emoji_el) quick_emoji_el.innerHTML = icon;
-
-	    const action_el = document.getElementById("current_action__" + key);
-	    const reasoning_el = document.getElementById("reasoning__" + key);
-	    const badge_el = document.getElementById("status_badge__" + key);
-	    const pv_el = document.getElementById("portfolio_value__" + key);
-	    const cash_el = document.getElementById("cash__" + key);
-	    const pos_el = document.getElementById("positions__" + key);
-
-	    if (rec) {
-	      action_el.innerHTML = rec.description + (rec.outcome ? " — " + rec.outcome : "");
-	      reasoning_el.innerHTML = rec.reasoning || "<em>none given</em>";
-	      pv_el.innerHTML = rec.portfolio_value != null
-	        ? Number(rec.portfolio_value).toLocaleString(undefined, {maximumFractionDigits: 0}) : "—";
-	      cash_el.innerHTML = rec.cash != null
-	        ? Number(rec.cash).toLocaleString(undefined, {maximumFractionDigits: 0}) : "—";
-
-	      const pos_parts = [];
-	      for (const sym in (rec.positions || {})) pos_parts.push(sym + " x" + rec.positions[sym].qty);
-	      pos_el.innerHTML = pos_parts.length ? pos_parts.join(", ") : "none";
-
-	      const status = rec.status || "unknown";
-	      let label = status.toUpperCase();
-	      if (rec.error_reason) label += " — " + rec.error_reason;
-	      if (rec.hallucination) label += " (filtered by action_filtering)";
-	      badge_el.innerHTML = label;
-	      badge_el.style.color = STATUS_COLORS[status] || "#777777";
-	      badge_el.style.background = STATUS_BG[status] || "#eeeeee";
-	      badge_el.style.padding = "2px 8px";
-	      badge_el.style.borderRadius = "6px";
-	    } else {
-	      action_el.innerHTML = "<em>no data yet for this step</em>";
-	      reasoning_el.innerHTML = "";
-	      badge_el.innerHTML = "";
-	      pv_el.innerHTML = "—";
-	      cash_el.innerHTML = "—";
-	      pos_el.innerHTML = "—";
-	    }
-
-	    const link_el = document.getElementById("state_details_link-" + key);
-	    if (link_el) {
-	      link_el.setAttribute("href", "/trading_persona_state/" + sim_code + "/" + step + "/" + key + "/");
+	    // Conversation text over the head only on steps the agent is really
+	    // in an interaction.
+	    const bubble = chat_bubbles[key];
+	    if (bubble) {
+	      if (rec && rec.chat) { bubble.setText(rec.chat); bubble.visible = true; }
+	      else { bubble.visible = false; }
 	    }
 	  }
+
+	  render_cards();
+	  render_detail();
+	  render_log();
 	}
 
-	function focus_persona(key) {
-	  document.getElementById("on_screen_det_content-init").style.display = "none";
+	function select_persona(key) {
+	  selected_key = (selected_key === key) ? null : key;
 	  for (const p_key in persona_init_pos) {
-	    document.getElementById("on_screen_det_content-" + p_key).style.display = "none";
-	    document.getElementById("on_screen_det_trigger_container-" + p_key).style.background = "";
+	    const card = el("card-" + p_key);
+	    if (card) card.classList.toggle("selected", p_key === selected_key);
 	  }
-	  document.getElementById("on_screen_det_content-" + key).style.display = "block";
-	  document.getElementById("on_screen_det_trigger_container-" + key).style.background = "#ABFF84";
+	  if (select_ring && !selected_key) { select_ring.x = -100; select_ring.y = -100; }
+	  log_filter = selected_key;
+	  el("log_filter_label").textContent = selected_key
+	    ? selected_key.replace(/_/g, " ") : "all agents";
+	  render_detail();
+	  render_log();
 	}
 
 	// ###########################################################################
-	// LIVE POLLING -- replaces the old bulk all_movement preload. Every
-	// POLL_INTERVAL_MS, ask trading_poll() for whatever trading_reverie.py has
-	// produced so far. As long as new steps keep showing up, play_replay()'s
-	// timer keeps walking sprites into them one at a time; once a poll comes
-	// back with sim_running=false and there's nothing left to catch up on,
-	// polling stops on its own.
+	// LIVE POLLING -- ask trading_poll() for whatever trading_reverie.py has
+	// produced so far. As long as new steps keep arriving, play_replay()'s timer
+	// keeps walking sprites into them; once a poll comes back with
+	// sim_running=false, polling stops on its own.
 	// ###########################################################################
 
 	function update_live_badge() {
-	  const el = document.getElementById("live_badge");
-	  if (!el) return;
+	  const e = el("live_badge");
+	  if (!e) return;
 	  if (is_running) {
-	    el.innerHTML = "&#9679; LIVE";
-	    el.style.color = "#a94442";
+	    e.className = "live";
+	    e.innerHTML = '<span class="dot">●</span> LIVE';
 	  } else {
-	    el.innerHTML = "FINISHED";
-	    el.style.color = "#777777";
+	    e.className = "finished";
+	    e.textContent = "FINISHED";
 	  }
 	}
 
@@ -442,49 +603,73 @@
 	      const seen_steps = Object.keys(all_movement).map(Number);
 	      max_step = seen_steps.length ? Math.max.apply(null, seen_steps) : 0;
 
-	      document.getElementById("step_slider").max = max_step;
-	      const max_step_el = document.getElementById("max-step-content");
-	      if (max_step_el) max_step_el.innerHTML = max_step;
+	      el("step_slider").max = max_step;
+	      el("max-step-content").textContent = max_step;
 	      update_live_badge();
 
 	      if (max_step > 0) play_replay();
+	      else render_step(step);
 	    })
 	    .catch(function (err) { console.error("trading_poll failed:", err); })
 	    .finally(function () {
-	      if (is_running) {
-	        setTimeout(poll_for_updates, POLL_INTERVAL_MS);
-	      }
+	      if (is_running) setTimeout(poll_for_updates, POLL_INTERVAL_MS);
 	    });
 	}
 
 	let play_interval = null;
 	function play_replay() {
 	  if (play_interval) return;
+	  el("play_button").textContent = "▶ Playing";
 	  play_interval = setInterval(function () {
 	    if (step >= max_step) {
-	      // Caught up to everything downloaded so far. If the backend is
-	      // done producing steps, stop; otherwise just wait -- the next
-	      // poll_for_updates() tick will raise max_step and this same
-	      // interval picks the walk back up automatically.
+	      // Caught up to everything downloaded so far. If the backend is done
+	      // producing steps, stop; otherwise wait -- the next poll raises
+	      // max_step and this same interval picks the walk back up.
 	      if (!is_running) pause_replay();
 	      return;
 	    }
 	    render_step(step + 1);
-	  }, 1600);
+	  }, STEP_MS);
 	}
 	function pause_replay() {
 	  if (play_interval) { clearInterval(play_interval); play_interval = null; }
+	  el("play_button").textContent = "▶ Play";
 	}
 
 	document.addEventListener("DOMContentLoaded", function () {
-	  document.getElementById("play_button").onclick = play_replay;
-	  document.getElementById("pause_button").onclick = pause_replay;
-	  document.getElementById("prev_button").onclick = function () { pause_replay(); render_step(step - 1); };
-	  document.getElementById("next_button").onclick = function () { pause_replay(); render_step(step + 1); };
-	  document.getElementById("step_slider").oninput = function (e) {
+	  el("play_button").onclick = play_replay;
+	  el("pause_button").onclick = pause_replay;
+	  el("prev_button").onclick = function () { pause_replay(); render_step(step - 1); };
+	  el("next_button").onclick = function () { pause_replay(); render_step(step + 1); };
+	  el("step_slider").oninput = function (e) {
 	    pause_replay();
 	    render_step(parseInt(e.target.value, 10));
 	  };
+	  el("log_clear_filter").onclick = function () {
+	    if (selected_key) select_persona(selected_key);   // toggles off
+	  };
+
+	  for (const card of document.querySelectorAll(".agent-card")) {
+	    card.onclick = function () { select_persona(this.dataset.key); };
+	  }
+
+	  // Static persona role line on each card -- straight from scratch.json.
+	  for (const key in persona_snippets) {
+	    const role_el = el("role-" + key);
+	    const snip = persona_snippets[key];
+	    if (role_el && snip) {
+	      role_el.textContent = [snip.trader_type, snip.risk_tolerance ? snip.risk_tolerance + " risk" : ""]
+	        .filter(Boolean).join(" · ");
+	    }
+	  }
+
+	  // Keyboard scrubbing.
+	  document.addEventListener("keydown", function (e) {
+	    if (e.key === "ArrowLeft")  { pause_replay(); render_step(step - 1); }
+	    if (e.key === "ArrowRight") { pause_replay(); render_step(step + 1); }
+	    if (e.key === " ") { e.preventDefault(); play_interval ? pause_replay() : play_replay(); }
+	  });
+
 	  update_live_badge();
 	  poll_for_updates();
 	});
