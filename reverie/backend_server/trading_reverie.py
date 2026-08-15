@@ -1109,6 +1109,14 @@ class TradingReverie:
             "decision":            decision,
             "requested":           filter_stats.get("requested") or {},
             "filter_status":       filter_stats.get("status", "success"),
+            # Why the first attempt failed validation. Captured by
+            # run_action_filtering_step() since it was written but never
+            # persisted, so a run could report a 24%-of-decisions fallback rate
+            # (run 04, Alex Chen) with nothing in the artifacts saying whether
+            # the model emitted unparseable JSON, omitted "action", or asked for
+            # something illegal. Without it the fallback rate is observable but
+            # not diagnosable.
+            "error_reason":        filter_stats.get("error_reason", ""),
             "outcome":             outcome,
             "hallucination":       hallucinated,
             "halluc_kind":         halluc_kind,
@@ -1167,6 +1175,11 @@ class TradingReverie:
                 # (step, request) of every hallucination, for episode collapsing
                 "halluc_requests":       [],
                 "fallback_decisions":    0,
+                # Why validation rejected the model's first attempt, tallied
+                # over the retry/fallback decisions. A high fallback rate is
+                # only actionable if you can see whether the cause is bad JSON
+                # or an illegal request.
+                "error_reasons":         Counter(),
                 "reasoned_decisions":    0,  # non-empty reasoning: the only
                                              # decisions stale/drift can score
                 "stale_context_hits":    0,
@@ -1218,6 +1231,9 @@ class TradingReverie:
 
             if entry.get("filter_status") == "fallback":
                 ag["fallback_decisions"] += 1
+
+            if entry.get("filter_status") in ("retry", "fallback"):
+                ag["error_reasons"][entry.get("error_reason") or "unspecified"] += 1
 
             if entry.get("has_reasoning"):
                 ag["reasoned_decisions"] += 1
@@ -1320,6 +1336,7 @@ class TradingReverie:
                 "hallucination_episode_rate_pct": episode_rate,
                 "fallback_decisions":           ag["fallback_decisions"],
                 "fallback_rate_pct":            fallback_rate,
+                "error_reasons":                dict(ag["error_reasons"]),
                 "reasoned_decisions":           ag["reasoned_decisions"],
                 "stale_context_hits":           ag["stale_context_hits"],
                 "stale_context_rate_pct":       stale_rate,
@@ -1444,6 +1461,11 @@ class TradingReverie:
             # the stale-context and persona-consistency checks for free.
             print(f"    Parser fallbacks      : {ag['fallback_decisions']}  "
                   f"({ag['fallback_rate_pct']}% of decisions)")
+            if ag.get("error_reasons"):
+                reasons = "  ".join(
+                    f"{r}={c}" for r, c in sorted(ag["error_reasons"].items(),
+                                                  key=lambda kv: -kv[1]))
+                print(f"      validation errors: {reasons}")
             print(f"    Decisions w/ reasoning: {ag['reasoned_decisions']}  "
                   f"(the only ones stale/drift can score)")
             stale_pct = ag["stale_context_rate_pct"]

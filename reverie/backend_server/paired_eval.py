@@ -92,10 +92,18 @@ def _classify(persona, market, decision, filter_stats):
     against a restored snapshot so neither arm's probe mutates the world.
     """
     snap = _snapshot(persona)
+    # execute_trading_action() reaches market.execute_order(), which appends a
+    # fill to market.order_log. Scoring BOTH arms every step therefore wrote
+    # phantom fills for trades that never happened -- including the arm that
+    # is not advancing the world. Nothing reads order_log today, so this had no
+    # effect on agent behaviour, but it left the order log an invalid record of
+    # a paired run. Truncate it back to its pre-probe length.
+    n_orders = len(market.order_log)
     try:
         result = execute_trading_action(persona, market, decision)
     finally:
         _restore(persona, snap)
+        del market.order_log[n_orders:]
 
     illegal = bool(filter_stats.get("illegal_request"))
     infeasible = bool(result["hallucination"]) or illegal
