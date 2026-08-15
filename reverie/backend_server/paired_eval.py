@@ -60,7 +60,7 @@ from trading_reverie import (
     _check_stale_reasoning,
     execute_trading_action,
 )
-from middleware.action_filtering import run_action_filtering_step
+from middleware.action_filtering import run_action_filtering_step, is_trade_request
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.prompt_template.gpt_structure import ollama_request
 from market_perceive import market_perceive, record_trade_fill, record_order_feedback
@@ -259,9 +259,15 @@ class PairedEvaluation(TradingReverie):
             "per_agent": {},
         }
         for arm in ("middleware", "baseline"):
-            attempts = sum(1 for p in self.pairs
-                           if (p[arm]["requested"].get("action") or p[arm]["action"])
-                           in ("buy", "sell"))
+            # Same denominator definition the independent report uses -- see
+            # is_trade_request(). An invalid verb is a trade request; a null
+            # action (unparseable) is not.
+            attempts = sum(
+                1 for p in self.pairs
+                if is_trade_request(
+                    p[arm]["requested"]
+                    if p[arm]["requested"].get("action")
+                    else {"action": p[arm]["action"]}))
             infeasible = sum(1 for p in self.pairs if p[arm]["infeasible"])
             caught = sum(1 for p in self.pairs
                          if p[arm]["disposition"] == "caught_pre_execution")

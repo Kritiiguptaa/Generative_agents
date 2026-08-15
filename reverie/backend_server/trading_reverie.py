@@ -79,6 +79,7 @@ from middleware.action_filtering    import (
     _market_is_open,
     _get_tradeable_symbols,
     coerce_quantity,
+    is_trade_request,
 )
 from middleware.persona_anchoring   import (
     score_persona_consistency,
@@ -239,8 +240,13 @@ def free_form_decision(persona: TradingPersona,
     were not comparable.
 
     Returns (decision, stats) with the same shape run_action_filtering_step()
-    returns. illegal_request is always False here: this arm has no legality
-    check, so illegality is detected downstream by execute_trading_action().
+    returns. illegal_request is set only for an action verb outside
+    BUY/SELL/HOLD, which is the one illegality this arm can see without a
+    legality check -- the parser has to reject an unknown verb regardless, and
+    the filtered arm counts the identical case as a hallucination, so leaving
+    it False here made the two arms measure different things. Every other kind
+    of illegality (unaffordable, unowned, over-limit) is still detected
+    downstream by execute_trading_action(), as it must be for this arm.
     """
     s = persona.scratch
     tradeable = _get_tradeable_symbols(persona, market)
@@ -299,6 +305,20 @@ Respond ONLY in this JSON format:
     if action == "analyze":
         action = "hold"
     if action not in ("buy", "sell", "hold"):
+        # An invented verb is an illegal *request*, not a formatting slip, and
+        # the middleware arm counts it as one ("action type is invalid" is in
+        # ILLEGAL_ACTION_ERRORS). Recording it here too is what keeps the two
+        # arms measuring the same thing: this path used to leave requested={}
+        # and illegal_request=False, so identical model behaviour was a
+        # hallucination under middleware and silently nothing under baseline --
+        # an asymmetry that inflated the middleware arm's rate against a
+        # baseline that could not report the failure at all.
+        stats["requested"] = {
+            "action": action,
+            "symbol": response.get("symbol") or response.get("ticker") or symbol_hint,
+            "quantity": coerce_quantity(response.get("quantity")),
+        }
+        stats["illegal_request"] = True
         return _fail(f"unknown action {action!r}")
 
     symbol = response.get("symbol")
@@ -1056,7 +1076,14 @@ class TradingReverie:
         # for the reason documented on record_order_feedback().
         feedback = ""
         req = filter_stats.get("requested") or {}
-        if illegal_request and req.get("action") in ("buy", "sell"):
+        # is_trade_request, not ("buy", "sell"): an agent whose request was
+        # rejected as "action type is invalid" got NO feedback under the old
+        # gate, so nothing in its memory recorded that the verb it invented does
+        # not exist -- and it asked again on the next step, forever. That is
+        # exactly the run-05 livelock, where Alex Chen's 48 rejections collapsed
+        # into 1 distinct episode. Feeding the rejection back is the only thing
+        # that can break it.
+        if illegal_request and is_trade_request(req):
             feedback = (
                 f"{name}'s order to {req['action']} {req.get('quantity')} "
                 f"{req.get('symbol')} was REJECTED: "
@@ -1224,9 +1251,13 @@ class TradingReverie:
             # The denominator for a hallucination rate has to be what the model
             # *asked* to do, not what it was allowed to do. Using executed
             # buy/sell counts meant a run where every illegal trade was blocked
-            # divided by ~0 and reported 0.0%.
-            requested_action = (entry.get("requested") or {}).get("action") or action
-            if requested_action in ("buy", "sell"):
+            # divided by ~0 and reported 0.0%. is_trade_request() rather than a
+            # ("buy", "sell") test because an invalid verb is a trade request
+            # too -- see its docstring for the 145.5% it used to produce.
+            requested = entry.get("requested") or {}
+            if not requested.get("action"):
+                requested = {"action": action}
+            if is_trade_request(requested):
                 ag["trade_attempts"] += 1
 
             if entry.get("filter_status") == "fallback":

@@ -49,7 +49,16 @@ def generate_insights_and_evidence(persona, nodes, n=5):
   try:
 
     for thought, evi_raw in ret.items():
-      evidence_node_id = [nodes[i].node_id for i in evi_raw]
+      # Clamp to the statements actually shown instead of indexing blind. The
+      # model is citing line numbers it read off a prompt, and it routinely
+      # cites one that doesn't exist -- statements here are numbered from 0
+      # (enumerate) while the prompt's own example, "(because of 1, 5, 3)",
+      # reads as 1-based, so an off-by-one is the expected case rather than the
+      # exceptional one. A single bad index raised IndexError and the except
+      # below discarded the entire reflection, including the insights that
+      # resolved fine. Drop the unresolvable citation, keep the insight.
+      evidence_node_id = [nodes[i].node_id for i in evi_raw
+                          if isinstance(i, int) and 0 <= i < len(nodes)]
       ret[thought] = evidence_node_id
     return ret
   except:

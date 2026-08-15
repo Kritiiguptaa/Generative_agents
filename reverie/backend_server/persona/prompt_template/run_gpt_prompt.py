@@ -16,7 +16,15 @@ from global_methods import *
 from persona.prompt_template.gpt_structure import *
 from persona.prompt_template.print_prompt import *
 
-def get_random_alphanumeric(i=6, j=6): 
+# Used by run_gpt_prompt_insight_and_guidance's line parser. Module level so
+# they compile once rather than per line of every reflection.
+_INSIGHT_ITEM_RE    = re.compile(r"^\s*(?:\d+\s*[.)\]:]|[-*•])\s*")
+_INSIGHT_PAREN_RE   = re.compile(r"\(([^()]*)\)")
+_INSIGHT_BECAUSE_RE = re.compile(
+    r"\b(?:because of|based on|due to|from statements?|supported by)\b", re.I)
+
+
+def get_random_alphanumeric(i=6, j=6):
   """
   Returns a random alpha numeric strength that has the length of somewhere
   between i and j. 
@@ -2225,26 +2233,94 @@ def run_gpt_prompt_insight_and_guidance(persona, statements, n, test_input=None,
     return prompt_input
   
   def __func_clean_up(gpt_response, prompt=""):
-    gpt_response = "1. " + gpt_response.strip()
+    # Was: split every line on the literal "(because of " and index [1]. One
+    # line anywhere in the response without that exact marker -- a "Here are
+    # the insights:" preamble, a closing remark, "based on 1, 3" instead of
+    # "because of 1, 3" -- raised IndexError and threw away the WHOLE
+    # response, including the lines that had parsed perfectly. That is what
+    # burned all 5 attempts on 114 reflections across the run-05 logs (21 in
+    # run_mw_05, 42 in run_base_05, 33 in paired_05_mw, 18 in paired_05_base),
+    # ~570 wasted LLM calls, every one of them ending in the fail-safe.
+    #
+    # Now: parse per line, keep what parses, skip what doesn't.
     ret = dict()
-    for i in gpt_response.split("\n"): 
-      row = i.split(". ")[-1]
-      thought = row.split("(because of ")[0].strip()
-      evi_raw = row.split("(because of ")[1].split(")")[0].strip()
-      evi_raw = re.findall(r'\d+', evi_raw)
-      evi_raw = [int(i.strip()) for i in evi_raw]
-      ret[thought] = evi_raw
-    return ret
+    salvaged = dict()
+    # The prompt template ends with "1.", so the model's first line is the
+    # continuation of an item it never had to number itself. Every LATER line
+    # has to carry its own marker to count as one.
+    for line_no, raw_line in enumerate(gpt_response.strip().split("\n")):
+      line = raw_line.strip()
+      if not line:
+        continue
+      # A bare preamble ("Here are the insights:") is not an insight.
+      if line.endswith(":"):
+        continue
+      was_list_item = line_no == 0 or bool(_INSIGHT_ITEM_RE.match(line))
+      # Repeatedly, not count=1: a model that echoes the prompt's "1." emits
+      # "1. 1. Sara trades NVDA", and a single strip leaves the second marker
+      # glued to the front of the thought.
+      while True:
+        stripped = _INSIGHT_ITEM_RE.sub("", line, count=1).strip()
+        if stripped == line:
+          break
+        line = stripped
+      if not line:
+        continue
 
-  def __func_validate(gpt_response, prompt=""): 
-    try: 
+      # Evidence is the last parenthesised group containing a digit, so a
+      # thought that itself contains parentheses doesn't derail the split.
+      evidence, thought = None, line
+      for match in _INSIGHT_PAREN_RE.finditer(line):
+        if any(c.isdigit() for c in match.group(1)):
+          evidence = [int(x) for x in re.findall(r'\d+', match.group(1))]
+          thought = line[:match.start()]
+      if evidence is None:
+        # Unparenthesised "... because of 1, 3" / "based on 2".
+        marker = _INSIGHT_BECAUSE_RE.search(line)
+        if marker:
+          tail = line[marker.end():]
+          if any(c.isdigit() for c in tail):
+            evidence = [int(x) for x in re.findall(r'\d+', tail)]
+            thought = line[:marker.start()]
+
+      thought = thought.strip().rstrip(".,:;- ").strip()
+      if len(thought) < 3 or not any(c.isalpha() for c in thought):
+        continue
+
+      if evidence is not None:
+        ret[thought] = evidence
+      elif was_list_item and line_no > 0:
+        # A numbered insight that simply cited nothing. Keeping it with no
+        # evidence beats discarding a whole reflection over a missing citation;
+        # reflect.py already handles an empty evidence list.
+        #
+        # line_no > 0 deliberately: only a line the model itself numbered
+        # counts here. Without that, a one-line refusal ("I cannot answer
+        # that.") was salvaged as a genuine insight and written into a_mem --
+        # strictly worse than the old behaviour, which retried and gave up.
+        salvaged[thought] = []
+
+    if ret:
+      return ret
+    if salvaged:
+      return salvaged
+    raise ValueError("no insights found in response")
+
+  def __func_validate(gpt_response, prompt=""):
+    try:
       __func_clean_up(gpt_response, prompt)
       return True
     except:
-      return False 
+      return False
 
-  def get_fail_safe(n): 
-    return ["I am hungry"] * n
+  def get_fail_safe(n):
+    # Was ["I am hungry"] * n -- a LIST, while __func_clean_up returns a DICT,
+    # and a leftover Smallville placeholder besides. reflect.py calls .items()
+    # on this, so the list raised AttributeError and was swallowed by the
+    # except there: the failure only behaved correctly by accident, and printed
+    # "['I am hungry', 'I am hungry']" into the run log 228 times. An empty dict
+    # is the same no-op deliberately, and iterates to nothing.
+    return {}
 
 
 

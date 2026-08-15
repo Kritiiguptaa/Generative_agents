@@ -282,6 +282,35 @@ def is_illegal_action_error(error: Optional[str]) -> bool:
 	return error in ILLEGAL_ACTION_ERRORS
 
 
+# Actions that move no shares. Anything else the model names -- including a verb
+# that does not exist, like "short" or "hedge" -- is it asking to trade.
+NON_TRADE_ACTIONS = frozenset({"hold", "analyze"})
+
+
+def is_trade_request(requested: Optional[Dict[str, object]]) -> bool:
+	"""
+	True if `requested` (from describe_request) is the model asking to trade.
+
+	This is the denominator for every hallucination rate, and it must not be
+	`action in ("buy", "sell")`. describe_request() reports the verb the model
+	actually emitted, and validate_response() rejects anything outside
+	BUY/SELL/HOLD with "action type is invalid" -- which is_illegal_action_error
+	counts as a hallucination. So an invalid verb incremented the numerator
+	while a ("buy", "sell") test left the denominator untouched, and the rate
+	could exceed 100%: run 05 reported Alex Chen at 48/33 = 145.5%, where all 48
+	were "action type is invalid" and none of the 48 could ever be counted.
+
+	Requesting an action that is not in the legal action space is the purest
+	form of action hallucination, so it belongs in both terms, not neither.
+	A null action (unparseable JSON) is a formatting failure, not a trade
+	request, and stays out of both -- see ILLEGAL_ACTION_ERRORS.
+	"""
+	action = (requested or {}).get("action")
+	if not isinstance(action, str):
+		return False
+	return action.strip().lower() not in NON_TRADE_ACTIONS
+
+
 def describe_request(response_text: str) -> Dict[str, object]:
 	"""
 	Best-effort extraction of what the model *asked for*, independent of whether
