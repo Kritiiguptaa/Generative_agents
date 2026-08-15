@@ -46,14 +46,21 @@ def generate_insights_and_evidence(persona, nodes, n=5):
   ret = run_gpt_prompt_insight_and_guidance(persona, statements, n)[0]
 
   print (ret)
-  try: 
+  try:
 
-    for thought, evi_raw in ret.items(): 
+    for thought, evi_raw in ret.items():
       evidence_node_id = [nodes[i].node_id for i in evi_raw]
       ret[thought] = evidence_node_id
     return ret
-  except: 
-    return {"this is blank": "node_1"} 
+  except:
+    # Used to return {"this is blank": "node_1"} -- a sentinel meaning
+    # "parsing failed", but run_reflect() has no idea it's a sentinel and
+    # iterates it like a real insight: the literal text "this is blank" got
+    # sent through generate_action_event_triple (5 wasted Ollama calls, always
+    # failing validation), scored for poignancy, embedded, and written into
+    # the agent's memory as a genuine thought. Returning {} makes the failure
+    # a no-op: the for-loop in run_reflect() naturally skips it.
+    return {}
 
 
 def generate_action_event_triple(act_desp, persona): 
