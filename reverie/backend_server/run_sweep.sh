@@ -27,7 +27,15 @@ set -u   # NOT -e: one crashed config must not kill the remaining seeds
 STEPS=200
 SEEDS=(42 43 44 45)
 MAX_HOURS=10
-OUT=/workspace/run06
+OUT=/workspace/run07
+# Sampling temperature for the decision call. MUST stay > 0: run 06 swept four
+# seeds at temperature=0, where decoding is greedy and the seed reaches only
+# the market generator. The middleware arm consequently replayed one
+# trajectory on every seed (Marcus buy=7/hold=193, PnL +$608.62 on all four;
+# s44 and s45 identical for all three agents), so four seeds bought n~=1 and
+# the sweep failed at its only purpose. Passed explicitly rather than left to
+# the CLI default so the sweep records the setting it ran under.
+TEMPERATURE=0.7
 
 MAX_SECONDS=$(( MAX_HOURS * 3600 ))
 mkdir -p "$OUT"
@@ -46,7 +54,7 @@ done
 echo "[$(date +%T)] preflight OK -- ollama up, mistral + nomic-embed-text present"
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader 2>/dev/null \
     || echo "WARNING: nvidia-smi unavailable -- check Ollama is not running CPU-only"
-echo "[$(date +%T)] plan: ${#SEEDS[@]} seeds x 4 configs, ${STEPS} steps, cap ${MAX_HOURS}h"
+echo "[$(date +%T)] plan: ${#SEEDS[@]} seeds x 4 configs, ${STEPS} steps, temp ${TEMPERATURE}, cap ${MAX_HOURS}h"
 
 START=$SECONDS
 
@@ -79,14 +87,14 @@ for s in "${SEEDS[@]}"; do
     echo ""
     echo "=================== SEED $s ==================="
 
-    run "mw_s$s"     trading_reverie.py --fork base_trading --sim run06_mw_s$s \
-                     --steps $STEPS --seed $s --fresh                       || break
-    run "base_s$s"   trading_reverie.py --fork base_trading --sim run06_base_s$s \
-                     --steps $STEPS --seed $s --fresh --no-middleware       || break
-    run "pmw_s$s"    paired_eval.py --fork base_trading --sim run06_pmw_s$s \
-                     --steps $STEPS --seed $s --fresh --advance-with middleware || break
-    run "pbase_s$s"  paired_eval.py --fork base_trading --sim run06_pbase_s$s \
-                     --steps $STEPS --seed $s --fresh --advance-with baseline   || break
+    run "mw_s$s"     trading_reverie.py --fork base_trading --sim run07_mw_s$s \
+                     --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh   || break
+    run "base_s$s"   trading_reverie.py --fork base_trading --sim run07_base_s$s \
+                     --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --no-middleware || break
+    run "pmw_s$s"    paired_eval.py --fork base_trading --sim run07_pmw_s$s \
+                     --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --advance-with middleware || break
+    run "pbase_s$s"  paired_eval.py --fork base_trading --sim run07_pbase_s$s \
+                     --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --advance-with baseline || break
 
     echo "---- seed $s complete | $(( (SECONDS - START) / 60 )) min elapsed ----"
 done

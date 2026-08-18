@@ -156,7 +156,9 @@ def make_trading_decision(persona: TradingPersona,
                           market:  MarketEnvironment,
                           retrieved: dict,
                           action_log_path: str,
-                          use_middleware: bool = True) -> dict:
+                          use_middleware: bool = True,
+                          seed: int = None,
+                          temperature: float = 0.0) -> dict:
     """
     Ask the LLM to decide what to do next.
     Returns (decision, compression_stats, filter_stats), where decision is
@@ -191,7 +193,13 @@ def make_trading_decision(persona: TradingPersona,
         #   blank line inside pretty-printed JSON would cut it off early.
         # Identical settings in both arms -- the switch changes what goes into
         # the prompt, never how the model is sampled.
-        return ollama_request(prompt, max_tokens=300, timeout=300, format="json")
+        # temperature/seed: at temperature=0 the model decodes greedily, so a
+        #   --seed sweep varies only the market and the arms replay near-
+        #   identical decisions (run 06: mw_s44 and mw_s45 were identical for
+        #   all three agents). Sampling above 0 with an explicit seed makes
+        #   each seed a genuinely different draw that is still reproducible.
+        return ollama_request(prompt, max_tokens=300, timeout=300, format="json",
+                              temperature=temperature, seed=seed)
 
     if use_middleware:
         decision, filter_stats = run_action_filtering_step(
@@ -890,11 +898,16 @@ class TradingReverie:
 
     def __init__(self, sim_code: str, fork_sim_code: str = "base_trading",
                  use_middleware: bool = True, fresh: bool = False,
-                 seed: int = 42):
+                 seed: int = 42, temperature: float = 0.7):
         self.sim_code       = sim_code
         self.fork_sim_code  = fork_sim_code
         self.use_middleware = use_middleware
         self.seed           = seed
+        # Decision-call sampling temperature. MUST be > 0 for --seed to reach
+        # agent behaviour at all: greedy decoding ignores the seed, which is
+        # why run 06's four seeds produced an effectively single middleware
+        # trajectory. Embeddings and every other call site stay at 0.
+        self.temperature    = temperature
         self.sim_folder    = f"{fs_storage}/{sim_code}"
         # Seed is a parameter so an arm can be replicated. A single run of each
         # arm cannot support a claim about a rate difference -- run 03 produced
@@ -1117,6 +1130,8 @@ class TradingReverie:
             retrieved,
             self.action_filter_log_path,
             use_middleware=self.use_middleware,
+            seed=self.seed,
+            temperature=self.temperature,
         )
         print(f"  [{name}] decision: {decision.get('action','?')} "
               f"{decision.get('symbol','')} x{decision.get('quantity','')}")
@@ -1441,6 +1456,17 @@ class TradingReverie:
             episode_rate = (round(episodes / attempts * 100, 1)
                             if attempts else None)
 
+            # Abstention. HOLD is legal by construction, so an arm can drive
+            # its hallucination rate toward 0 purely by not trading -- and in
+            # run 06 the middleware arm did exactly that: 21.5 median trade
+            # attempts against the baseline's 184.5, with Alex Chen requesting
+            # ZERO trades in three of four seeds. A 0.0% rate computed over 21
+            # requests from a mostly-abstaining arm is not the same result as
+            # 0.0% over 184, and the report must not let the two look alike.
+            # Reported next to the rate, never instead of it.
+            abstention_rate = round(ag["action_counts"].get("hold", 0)
+                                    / total * 100, 1)
+
             # drift_scores only ever collects non-None values, so this averages
             # over decisions that were actually scoreable.
             scores = ag["drift_scores"]
@@ -1490,6 +1516,8 @@ class TradingReverie:
                                           if total else 0),
                 },
                 "action_distribution":          ag["action_counts"],
+                "abstention_rate_pct":           abstention_rate,
+                "participated":                  bool(attempts),
                 "start_portfolio_usd":          ag["start_portfolio"],
                 "end_portfolio_usd":            ag["end_portfolio"],
                 "pnl_usd":                      pnl,
@@ -1503,6 +1531,9 @@ class TradingReverie:
         total_episodes  = sum(s["hallucination_episodes"] for s in summary.values())
         total_contra    = sum(a["state_contradictions"] for a in per_agent.values())
         total_reasoned  = sum(a["reasoned_decisions"]   for a in per_agent.values())
+        total_holds     = sum(a["action_counts"].get("hold", 0)
+                              for a in per_agent.values())
+        participating   = sum(1 for a in per_agent.values() if a["trade_attempts"])
         return {
             "middleware_enabled":          self.use_middleware,
             "simulation_steps":            n_steps,
@@ -1522,6 +1553,14 @@ class TradingReverie:
             "overall_episode_rate_pct":
                 (round(total_episodes / total_attempts * 100, 1)
                  if total_attempts else None),
+            # Companion figures for the headline rate. See abstention_rate_pct
+            # above: without these, an arm that abstains its way to 0% is
+            # indistinguishable from one that traded heavily and stayed clean.
+            "total_abstention_rate_pct":
+                (round(total_holds / total_decisions * 100, 1)
+                 if total_decisions else None),
+            "participating_agents":        participating,
+            "total_agents":                len(per_agent),
             "total_state_contradictions":  total_contra,
             "overall_state_contradiction_rate_pct":
                 (round(total_contra / total_reasoned * 100, 1)
@@ -1557,11 +1596,25 @@ class TradingReverie:
         print(f"  distinct episodes       : "
               f"{report.get('total_hallucination_episodes', 0)}"
               + (f"  ({ep_rate}% of attempts)" if ep_rate is not None else ""))
+        # Abstention, printed directly under the rate it qualifies. HOLD is
+        # always legal, so trading less is a way to score better without
+        # deciding better -- run 06's middleware arm reported 0.0% off 21 trade
+        # attempts while the baseline reported 66.9% off 184. Those are not the
+        # same finding and must not read as one.
+        abst   = report.get("total_abstention_rate_pct")
+        part   = report.get("participating_agents", 0)
+        n_ag   = report.get("total_agents", 0)
+        print(f"Abstention (HOLD)    : "
+              + (f"{abst}% of decisions" if abst is not None else "N/A")
+              + "   <- the rate above falls as this rises")
+        if n_ag and part < n_ag:
+            print(f"  !! {n_ag - part} of {n_ag} agents requested NO trades at all. "
+                  f"The rate above rests entirely on the other {part}.")
         c_rate = report.get("overall_state_contradiction_rate_pct")
         print(f"State contradictions : {report.get('total_state_contradictions', 0)}"
               + (f"  ({c_rate}% of reasoned decisions)" if c_rate is not None
                  else "  (rate N/A)")
-              + "   <- includes HOLDs")
+              + "   <- includes HOLDs, so it scores an abstaining arm too")
         print()
         for name, ag in report["per_agent"].items():
             print(f"  {name}")
@@ -1629,6 +1682,9 @@ class TradingReverie:
             print(f"    Actions        : buy={dist.get('buy',0)}  "
                   f"sell={dist.get('sell',0)}  hold={dist.get('hold',0)}  "
                   f"analyze={dist.get('analyze',0)}")
+            print(f"    Abstention     : {ag.get('abstention_rate_pct', 0)}% HOLD"
+                  + ("" if ag.get("participated", True)
+                     else "   <- NON-PARTICIPANT: requested no trades all run"))
             print(f"    Portfolio PnL  : ${ag['pnl_usd']:+,.2f}  "
                   f"(${ag['start_portfolio_usd']:,.0f} -> ${ag['end_portfolio_usd']:,.0f})")
             print()
@@ -1689,11 +1745,18 @@ def main():
                         help="Market seed. Paired arms MUST share a seed, and "
                              "several seeds per arm are needed before a rate "
                              "difference means anything.")
+    parser.add_argument("--temperature", type=float, default=0.7,
+                        help="Decision-call sampling temperature. Must be > 0 "
+                             "for --seed to change agent behaviour -- at 0 the "
+                             "model decodes greedily and every seed replays "
+                             "the same decisions (run 06). Use 0 only to "
+                             "reproduce a pre-run-07 result.")
     args = parser.parse_args()
 
     sim = TradingReverie(args.sim, args.fork,
                          use_middleware=not args.no_middleware,
-                         fresh=args.fresh, seed=args.seed)
+                         fresh=args.fresh, seed=args.seed,
+                         temperature=args.temperature)
     sim.run(args.steps)
 
 

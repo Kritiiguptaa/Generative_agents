@@ -64,6 +64,11 @@ from middleware.action_filtering import run_action_filtering_step, is_trade_requ
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.prompt_template.gpt_structure import ollama_request
 from market_perceive import market_perceive, record_trade_fill, record_order_feedback
+# The independent runner updates the ID-RAG identity graph every step
+# (trading_reverie._step_agent). This harness did not, so id_rag_anchor() here
+# was reading a frozen bootstrap graph while the independent middleware arm
+# read a live one -- the two harnesses were running different middleware.
+from middleware.id_rag import update_graph_belief, update_graph_current_situation
 
 
 def _snapshot(persona):
@@ -139,7 +144,13 @@ class PairedEvaluation(TradingReverie):
         scratch.
         """
         def _call_llm(prompt):
-            return ollama_request(prompt, max_tokens=300, format="json")
+            # Same sampling settings for BOTH arms -- the arm switch changes
+            # what goes into the prompt, never how the model is sampled.
+            # seed/temperature are inherited from TradingReverie; at
+            # temperature=0 the seed is inert and every seed replays the same
+            # decisions (run 06).
+            return ollama_request(prompt, max_tokens=300, format="json",
+                                  temperature=self.temperature, seed=self.seed)
 
         base_snap = _snapshot(persona)
 
@@ -179,7 +190,25 @@ class PairedEvaluation(TradingReverie):
         refresh_currently(persona, self.market)
 
         from persona.cognitive_modules.reflect import reflect
+        thoughts_before = len(persona.a_mem.seq_thought)
         reflect(persona)
+        new_thoughts = persona.a_mem.seq_thought[thoughts_before:]
+
+        # ID-RAG dynamic updates after reflect. This block mirrors
+        # trading_reverie._step_agent and its absence was a real defect, not a
+        # simplification: in run 06, seed 42, advancing with middleware, this
+        # harness reported 175 middleware trade attempts at ~2,036 context
+        # chars where the independent runner on the same seed reported 50 at
+        # ~800. The arms diverged at STEP 1 (Marcus: buy TSLA x13 independent
+        # vs buy AMD x9 paired), which rules out drift -- the paired
+        # middleware arm was anchoring on a stale identity graph from the
+        # first decision onward. Paired run-06 numbers predate this fix.
+        currently = getattr(persona.scratch, "currently", "") or ""
+        update_graph_current_situation(name, currently)
+        for thought_node in new_thoughts:
+            desc = getattr(thought_node, "description", "") or ""
+            if desc:
+                update_graph_belief(name, desc)
 
         from trading_reverie import current_focus_str
         focus = current_focus_str(persona, self.market)
@@ -379,10 +408,15 @@ def main():
                     help="Which arm's decisions actually move the world. Run "
                          "both ways; a conclusion that depends on this is not "
                          "robust.")
+    ap.add_argument("--temperature", type=float, default=0.7,
+                    help="Decision-call sampling temperature. Must be > 0 for "
+                         "--seed to change agent behaviour. Keep it identical "
+                         "across the paired arms and across the sweep.")
     args = ap.parse_args()
 
     sim = PairedEvaluation(args.sim, args.fork, use_middleware=True,
                            fresh=args.fresh, seed=args.seed,
+                           temperature=args.temperature,
                            advance_with=args.advance_with)
     sim.run(args.steps)
 

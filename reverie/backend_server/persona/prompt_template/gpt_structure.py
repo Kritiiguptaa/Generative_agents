@@ -52,7 +52,7 @@ def temp_sleep(seconds=0.1):
 # reflect/poignancy call sites below (which pass no timeout) failed more often
 # than they succeeded, burning a full 60s each time before returning the
 # "OLLAMA ERROR" sentinel and retrying.
-def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=300, max_tokens=None, stop=None, format=None):
+def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=300, max_tokens=None, stop=None, format=None, seed=None):
   if model is None:
     model = OLLAMA_CHAT_MODEL
 
@@ -71,6 +71,17 @@ def ollama_request(prompt, model=None, temperature=0, stream=False, timeout=300,
     options["num_predict"] = max_tokens
   if stop:
     options["stop"] = stop
+  # Sampler seed. This ONLY has an effect when temperature > 0 -- greedy
+  # decoding is deterministic no matter what seed you hand it. Run 06 swept
+  # four --seed values while the decision call ran at temperature=0, so the
+  # seed reached the market generator and nothing else: the middleware arm
+  # produced near-identical behaviour on every seed (Marcus buy=7/hold=193 and
+  # PnL +$608.62 on all four; s44 and s45 identical for all three agents).
+  # Four seeds therefore bought n~=1, which is the exact thing the sweep
+  # existed to fix. Seed AND temperature>0 together are what make seeds real;
+  # either alone does nothing.
+  if seed is not None:
+    options["seed"] = seed
 
   payload = {
     "model": model,
