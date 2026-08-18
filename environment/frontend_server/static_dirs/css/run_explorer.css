@@ -1,0 +1,376 @@
+/*
+  Run Explorer -- the evidence page for a single run.
+
+  Layers on top of trading_ui.css and reuses its tokens (--panel, --line,
+  --accent, --buy, --sell, --warn) so the two pages read as one product.
+  Everything here is prefixed .rx- to avoid colliding with the map's classes.
+*/
+
+.rx-wrap {
+	max-width: 1500px;
+	margin: 0 auto;
+	padding: 20px 22px 60px;
+}
+
+/* ---------------------------------------------------------- arm badge */
+/* The single most important thing on the page: which condition this run
+   was. A middleware run and a baseline run are otherwise identical at a
+   glance, and mixing them up invalidates every number quoted from here. */
+.arm-badge {
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.12em;
+	padding: 4px 12px;
+	border-radius: 4px;
+	border: 1px solid;
+}
+.arm-mw      { color: #0b0e14; background: var(--accent); border-color: var(--accent); }
+.arm-base    { color: var(--warn); background: transparent; border-color: var(--warn); }
+.arm-unknown { color: var(--text-faint); border-color: var(--line); }
+
+.live-dot {
+	width: 7px; height: 7px; border-radius: 50%;
+	background: var(--sell);
+	box-shadow: 0 0 0 3px rgba(255, 95, 109, 0.18);
+}
+
+/* ----------------------------------------------------------- identity */
+.rx-ident {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+	gap: 1px;
+	background: var(--line);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	overflow: hidden;
+	margin-bottom: 16px;
+}
+.rx-ident > div { background: var(--panel); padding: 14px 16px; }
+.rx-ident-label {
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--text-faint);
+	margin-bottom: 4px;
+}
+.rx-ident-value { font-family: var(--mono); font-size: 17px; color: var(--text); }
+.rx-ident-value.v-mw      { color: var(--accent); }
+.rx-ident-value.v-base    { color: var(--warn); }
+.rx-ident-value.v-missing { color: var(--sell); font-size: 13px; font-style: italic; }
+
+/* A missing model or seed is a real problem for anyone comparing runs, so
+   it gets a banner rather than a quiet dash. */
+.rx-warn {
+	border: 1px solid var(--warn);
+	border-left-width: 3px;
+	background: rgba(240, 180, 41, 0.07);
+	padding: 12px 16px;
+	border-radius: 6px;
+	margin-bottom: 16px;
+	font-size: 13px;
+	color: var(--text);
+}
+.rx-warn b { color: var(--warn); }
+
+/* ---------------------------------------------------------- headline */
+.rx-headline { margin-bottom: 16px; }
+.rx-disp {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+	gap: 14px;
+}
+.rx-disp-cell {
+	background: var(--panel-2);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 18px;
+	text-align: center;
+}
+.rx-disp-num {
+	font-family: var(--mono);
+	font-size: 40px;
+	line-height: 1.1;
+	color: var(--text);
+}
+.rx-disp-num.good { color: var(--buy); }
+.rx-disp-num.bad  { color: var(--sell); }
+.rx-disp-lab {
+	font-size: 12px;
+	margin-top: 6px;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--text-dim);
+}
+.rx-disp-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; }
+.rx-note {
+	margin: 16px 0 0;
+	font-size: 13px;
+	color: var(--text-dim);
+	border-top: 1px solid var(--line);
+	padding-top: 12px;
+}
+.rx-note b { color: var(--text); }
+
+/* --------------------------------------------------- secondary metrics */
+.rx-metrics {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+	gap: 12px;
+	margin-bottom: 18px;
+}
+.rx-metric {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 14px 16px;
+}
+.rx-metric-num { font-family: var(--mono); font-size: 24px; color: var(--text); }
+.rx-metric-lab { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.rx-metric-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; }
+
+/* ------------------------------------------------------------ columns */
+.rx-cols {
+	display: grid;
+	grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+	gap: 18px;
+	align-items: start;
+	margin-bottom: 18px;
+}
+@media (max-width: 1080px) { .rx-cols { grid-template-columns: minmax(0, 1fr); } }
+.rx-sticky { position: sticky; top: 74px; }
+
+/* ----------------------------------------------------------- filters */
+.rx-filters {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 7px;
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--line);
+}
+.rx-fbtn {
+	background: var(--panel-2);
+	border: 1px solid var(--line);
+	color: var(--text-dim);
+	font-family: var(--mono);
+	font-size: 11px;
+	padding: 5px 11px;
+	border-radius: 999px;
+	cursor: pointer;
+}
+.rx-fbtn:hover  { color: var(--text); border-color: var(--accent); }
+.rx-fbtn.active { color: #0b0e14; background: var(--accent); border-color: var(--accent); }
+/* The hallucination filter is the demo button -- it goes straight to the
+   evidence -- so it stays visually distinct until it is the active one. */
+.rx-fbtn.danger:not(.active) { color: var(--sell); border-color: rgba(255,95,109,0.4); }
+.rx-select {
+	background: var(--panel-2);
+	border: 1px solid var(--line);
+	color: var(--text-dim);
+	font-family: var(--mono);
+	font-size: 11px;
+	padding: 5px 8px;
+	border-radius: 999px;
+	margin-left: auto;
+}
+
+/* ---------------------------------------------------------- timeline */
+.rx-timeline { max-height: 620px; overflow-y: auto; }
+.rx-ev {
+	display: flex;
+	gap: 12px;
+	align-items: flex-start;
+	padding: 10px 14px;
+	border-bottom: 1px solid var(--line);
+	border-left: 3px solid transparent;
+	cursor: pointer;
+}
+.rx-ev:hover { background: var(--panel-2); }
+.rx-ev.sel   { background: var(--panel-2); border-left-color: var(--accent); }
+.rx-ev-step {
+	font-family: var(--mono);
+	font-size: 12px;
+	color: var(--text-faint);
+	min-width: 30px;
+	text-align: right;
+	padding-top: 1px;
+}
+.rx-ev-main { flex: 1; min-width: 0; }
+.rx-ev-title { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+.rx-ev-detail {
+	font-size: 11.5px;
+	color: var(--text-faint);
+	margin-top: 2px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+}
+.rx-ev-map {
+	font-family: var(--mono);
+	font-size: 10.5px;
+	color: var(--text-faint);
+	white-space: nowrap;
+	padding-top: 2px;
+}
+.rx-ev-map:hover { color: var(--accent); }
+
+/* Severity stripe, so the timeline is scannable without reading it. */
+.rx-ev.sev-bad  { border-left-color: rgba(255, 95, 109, 0.75); }
+.rx-ev.sev-up   { border-left-color: rgba(46, 204, 143, 0.5); }
+.rx-ev.sev-down { border-left-color: rgba(255, 95, 109, 0.35); }
+.rx-ev.sev-warn { border-left-color: rgba(240, 180, 41, 0.6); }
+.rx-ev.sev-info { border-left-color: rgba(77, 159, 255, 0.6); }
+.rx-ev.sev-dim  { border-left-color: var(--line); }
+.rx-ev.sev-bad .rx-ev-title { color: var(--sell); }
+
+/* --------------------------------------------------------- inspector */
+.rx-insp { border-bottom: 1px solid var(--line); padding-bottom: 16px; margin-bottom: 16px; }
+.rx-insp:last-child { border-bottom: 0; margin-bottom: 0; padding-bottom: 0; }
+.rx-insp-head { font-family: var(--mono); font-size: 13px; margin-bottom: 10px; }
+.rx-insp-lab {
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--text-faint);
+	margin: 14px 0 5px;
+}
+
+/* requested -> executed. This is the whole argument of the project in one
+   row, so it is deliberately the loudest element in the panel. */
+.rx-diff {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	background: var(--panel-2);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 12px 14px;
+}
+.rx-diff.diverged { border-color: rgba(255, 95, 109, 0.55); }
+.rx-diff > div { flex: 1; min-width: 0; }
+.rx-diff span {
+	display: block;
+	font-family: var(--mono);
+	font-size: 9.5px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--text-faint);
+}
+.rx-diff b {
+	font-family: var(--mono);
+	font-size: 14px;
+	color: var(--text);
+	word-break: break-word;
+}
+.rx-diff.diverged b { color: var(--sell); }
+.rx-diff .rx-arrow { flex: none; color: var(--text-faint); font-size: 16px; }
+.rx-diff-note { font-size: 11.5px; color: var(--sell); margin-top: 6px; }
+
+.rx-reason {
+	font-family: var(--mono);
+	font-size: 11.5px;
+	color: var(--sell);
+	background: rgba(255, 95, 109, 0.08);
+	border-radius: 5px;
+	padding: 7px 10px;
+	margin-top: 8px;
+}
+.rx-reasoning {
+	font-size: 12.5px;
+	line-height: 1.6;
+	color: var(--text-dim);
+	background: var(--panel-2);
+	border-radius: 6px;
+	padding: 11px 13px;
+	max-height: 230px;
+	overflow-y: auto;
+	white-space: pre-wrap;
+}
+
+/* -------------------------------------------------------- key/value */
+.rx-kv { width: 100%; border-collapse: collapse; font-size: 12px; }
+.rx-kv td { padding: 5px 0; border-bottom: 1px solid var(--line); }
+.rx-kv td:first-child { color: var(--text-faint); }
+.rx-kv td:last-child  { text-align: right; font-family: var(--mono); color: var(--text); }
+.rx-kv tr:last-child td { border-bottom: 0; }
+.rx-kv td.bad, .bad { color: var(--sell); }
+
+/* ----------------------------------------------------------- agents */
+.rx-agents {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+	gap: 14px;
+	padding: 16px;
+}
+.rx-agent {
+	background: var(--panel-2);
+	border: 1px solid var(--line);
+	border-radius: 8px;
+	padding: 14px 16px;
+}
+.rx-agent-name { font-size: 15px; font-weight: 600; }
+.rx-agent-role { font-family: var(--mono); font-size: 11px; color: var(--text-faint); margin-bottom: 10px; }
+.rx-designed {
+	font-size: 11.5px;
+	color: var(--warn);
+	background: rgba(240, 180, 41, 0.08);
+	border-radius: 5px;
+	padding: 7px 10px;
+	margin-bottom: 12px;
+}
+.rx-designed span {
+	display: block;
+	font-family: var(--mono);
+	font-size: 9.5px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--text-faint);
+}
+.rx-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+.rx-tag {
+	font-family: var(--mono);
+	font-size: 10px;
+	padding: 3px 7px;
+	border-radius: 4px;
+	background: var(--panel);
+	border: 1px solid var(--line);
+	color: var(--text-dim);
+}
+.rx-tag.bad { color: var(--sell); border-color: rgba(255, 95, 109, 0.4); }
+
+/* ---------------------------------------------------------- caveats */
+.rx-caveats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+	gap: 14px;
+}
+.rx-caveat {
+	font-size: 12.5px;
+	color: var(--text-dim);
+	line-height: 1.6;
+	border-left: 2px solid var(--line);
+	padding-left: 12px;
+}
+.rx-caveat b { display: block; color: var(--text); margin-bottom: 3px; }
+.rx-caveat code { font-family: var(--mono); font-size: 11.5px; color: var(--accent); }
+.rx-flag { display: block; color: var(--warn); margin-top: 4px; }
+
+.rx-foot {
+	margin-top: 22px;
+	padding-top: 14px;
+	border-top: 1px solid var(--line);
+	font-size: 11.5px;
+	color: var(--text-faint);
+	overflow-x: auto;
+}
+.rx-foot code { font-family: var(--mono); white-space: nowrap; }
+
+.rx-insp .btn { margin-top: 14px; display: inline-block; }
+
+/* A count derived from the log rather than read from a finished report --
+   labelled so nobody quotes it as the official figure. */
+.chip-warn { color: var(--warn); border-color: rgba(240, 180, 41, 0.45); }

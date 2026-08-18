@@ -366,9 +366,158 @@ def trading_map(request, sim_code, step=0):
     # Map geometry comes from sim_data so the tile constants live in exactly
     # one place -- the frontend never hardcodes its own copy.
     "market_board_tile": json.dumps(sim_data.MARKET_BOARD_TILE),
+    "break_room_tile": json.dumps(sim_data.BREAK_ROOM_TILE),
   }
   template = "trading_map/trading_map.html"
   return render(request, template, context)
+
+
+NON_TRADE_ACTIONS = frozenset({"hold", "analyze"})
+
+
+def _is_trade_attempt(d):
+  """
+  Did the model ask to trade on this decision?
+
+  Mirrors action_filtering.is_trade_request: an INVERTED test, because an
+  allowlist of buy/sell can only ever undercount. Anything that is not
+  explicitly a no-op counts, including verbs nobody anticipated.
+
+  The third clause is the one that matters. A rejected request is logged with
+  a substituted HOLD as its final action, and older logs carry no `requested`
+  field at all -- so testing only the final verb drops every rejection from
+  the denominator while keeping it in the numerator. That is exactly the
+  defect behind the 145.5% rate in CHANGES section 19.1, and leaving it here
+  would reintroduce it on this page.
+  """
+  requested = (d.get("requested") or {}).get("action")
+  if isinstance(requested, str) and requested.strip().lower() not in NON_TRADE_ACTIONS:
+    return True
+  if d.get("action") in ("buy", "sell"):
+    return True
+  return bool(d.get("hallucination"))
+
+
+def has_report_counts(report):
+  """True when the report actually carries the disposition counts."""
+  return report.get("total_caught_pre_execution") is not None \
+      and report.get("total_executed_malformed") is not None
+
+
+def run_explorer(request, sim_code):
+  """
+  <BACKEND to FRONTEND>
+  The run's evidence page: what condition this was, what the middleware caught
+  versus executed, every notable event in step order (each deep-linking into
+  the map), and every decision's requested-vs-final record.
+
+  Distinct from trading_map(): that shows a run happening, this shows what a
+  run *found*. Both read the same storage through sim_data.
+  """
+  meta = sim_data.load_meta(sim_code)
+  report = sim_data.load_hallucination_report(sim_code) or {}
+  events = sim_data.build_events(sim_code)
+  decisions = sim_data.build_decisions(sim_code)
+  status = sim_data.load_run_status(sim_code)
+  persona_names = meta.get("persona_names", [])
+
+  steps = sorted({d["step"] for d in decisions})
+
+  # Per-agent scorecards, pairing the designed failure mode against what the
+  # run actually did. The design intent is fixed (it comes from the persona
+  # construction, see PROJECT_OVERVIEW section 3); everything else is counted.
+  designed = {
+    "Alex Chen":   "over-caution -- waits for confirmation indefinitely",
+    "Marcus Webb": "over-sizing beyond available cash",
+    "Sara Kim":    "acting on stale headlines",
+  }
+  agents = []
+  for name in persona_names:
+    stats = (report.get("per_agent") or {}).get(name, {})
+    own = [d for d in decisions if d["agent"] == name]
+    holds = sum(1 for d in own if d["action"] not in ("buy", "sell"))
+    longest, run_len = 0, 0
+    for d in own:
+      run_len = 0 if d["action"] in ("buy", "sell") else run_len + 1
+      longest = max(longest, run_len)
+    agents.append({
+      "name": name,
+      "snippet": sim_data.load_persona_snippet(sim_code, name),
+      "designed": designed.get(name, ""),
+      "stats": stats,
+      "decisions": len(own),
+      "trades": sum(1 for d in own if d["action"] in ("buy", "sell")),
+      "holds": holds,
+      "hallucinations": sum(1 for d in own if d["hallucination"]),
+      "longest_hold_streak": longest,
+      "kinds": stats.get("hallucination_kinds") or {},
+      "error_reasons": stats.get("error_reasons") or {},
+    })
+
+  # Headline counts. hallucination_report.json is only written when a run
+  # finishes, so for a run still in flight (or one killed early) it is absent
+  # and every report.* lookup renders 0. Showing "0 caught" next to agent cards
+  # counting 28 hallucinations is worse than showing nothing -- it is a
+  # confident wrong number, which is the exact failure this project keeps
+  # rediscovering. So derive the counts from the log when the report is absent,
+  # and mark them as derived.
+  headline = {
+    "caught": report.get("total_caught_pre_execution"),
+    "executed": report.get("total_executed_malformed"),
+    "attempts": report.get("total_trade_attempts"),
+    "rate": report.get("overall_hallucination_rate_pct"),
+    "derived": False,
+  }
+  if not has_report_counts(report):
+    caught = sum(1 for d in decisions
+                 if d["hallucination"] and d["disposition"] != "executed_malformed")
+    executed = sum(1 for d in decisions if d["disposition"] == "executed_malformed")
+    attempts = sum(1 for d in decisions if _is_trade_attempt(d))
+    headline = {
+      "caught": caught,
+      "executed": executed,
+      "attempts": attempts,
+      # 0/0 prints N/A, never 0.0% -- a vacuous result must not look measured.
+      "rate": round((caught + executed) / attempts * 100, 1) if attempts else None,
+      "derived": True,
+    }
+
+  # Whatever compression recorded, averaged over the decisions that carry it.
+  comp_in = [d["compression"].get("nodes_in") for d in decisions
+             if isinstance(d.get("compression"), dict) and d["compression"].get("nodes_in")]
+  comp_out = [d["compression"].get("nodes_out") for d in decisions
+              if isinstance(d.get("compression"), dict) and d["compression"].get("nodes_out")]
+  compression = None
+  if comp_in and comp_out:
+    compression = {
+      "nodes_in": round(sum(comp_in) / len(comp_in), 1),
+      "nodes_out": round(sum(comp_out) / len(comp_out), 1),
+      "samples": len(comp_in),
+    }
+
+  context = {
+    "sim_code": sim_code,
+    "meta": meta,
+    "report": report,
+    "has_report": bool(report),
+    "headline": headline,
+    "events_json": json.dumps(events),
+    "decisions_json": json.dumps(decisions),
+    "event_count": len(events),
+    "agents": agents,
+    "persona_names": persona_names,
+    "compression": compression,
+    "is_running": status["is_running"],
+    "first_step": steps[0] if steps else 0,
+    "last_step": steps[-1] if steps else 0,
+    "middleware_enabled": report.get("middleware_enabled"),
+    # Recorded nowhere in the report today -- see CHANGES section 22 item 2.
+    # Shown as unknown rather than guessed, because a wrong model label is
+    # worse than an absent one.
+    "model_name": report.get("model") or meta.get("model") or "",
+    "seed": report.get("seed") if report.get("seed") is not None else meta.get("seed"),
+  }
+  return render(request, "trading_map/run_explorer.html", context)
 
 
 def trading_poll(request, sim_code):

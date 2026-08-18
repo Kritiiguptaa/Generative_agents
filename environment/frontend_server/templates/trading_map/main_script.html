@@ -33,6 +33,7 @@
 	let interactions_by_step = {};
 	let is_running = {{ is_running|yesno:"true,false" }};
 	let market_board_tile = {{ market_board_tile|safe }};
+	let break_room_tile = {{ break_room_tile|safe }};
 	let start_datetime = new Date(Date.parse("{{ start_datetime }}"));
 
 	const POLL_INTERVAL_MS = 4000;
@@ -60,14 +61,69 @@
 	let chat_bubbles = {};      // {bg, text} -- only shown during a real interaction
 	let name_plates = {};
 	let plate_offset = {};      // per-agent nameplate dy, staggered in create()
+	let agent_order = {};       // per-agent 0..n index, used to stagger overlays
+	let active_float = {};      // per-agent live floating label, at most one
 	let select_ring = null;
+	let game_scene = null;      // the Phaser scene, for tweens outside create()
+
+	// AMBIENT STAFF. Purely decorative -- they carry no simulation data and are
+	// deliberately kept out of the agents' band (the desk row y=8, the market
+	// board at y=4 and the aisle between them) so they can never be mistaken
+	// for, or visually collide with, the three traders the map exists to report
+	// on. They also have no nameplates and are drawn dimmer and behind.
+	let npcs = {};
+	const NPC_SPEED = 0.55;         // px/frame -- a stroll, well under the agents'
+	// Two kinds of staff. "desk" stand at a workstation facing their monitor and
+	// stay there, taking an occasional errand; "roam" walk a circuit. An office
+	// where every single person is permanently walking about reads as a station
+	// concourse, so most of these are working and only two are in motion.
+	//
+	// The desk tiles mirror the traders' own arrangement exactly: the agents
+	// stand on the aisle at y=8 facing up into the desks on y=6/7, and these
+	// stand on the aisle at y=13 facing up into the desks on y=11/12.
+	const NPC_ROUTES = [
+	  // Homes are the chair tiles (gid 941), same as the traders' -- solid in
+	  // Collisions, reachable because find_path allows a solid destination.
+	  {key: "npc_abigail",  role: "desk", home: [18, 13], stops: [[20, 10], [22, 14]]},
+	  {key: "npc_adam",     role: "desk", home: [28, 13], stops: [[30, 10], [22, 14]]},
+	  {key: "npc_rajiv",    role: "desk", home: [33, 13], stops: [[30, 10], [27, 14]]},
+	  {key: "npc_eddy",     role: "desk", home: [6, 4],   stops: [[10, 4], [3, 4]]},
+	  {key: "npc_jennifer", role: "roam", home: [6, 12],  stops: [[6, 12], [10, 14], [3, 10]]},
+	  {key: "npc_tamara",   role: "roam", home: [12, 19], stops: [[12, 19], [16, 23], [4, 18]]}
+	];
+	let light_overlay = null;   // daylight wash, driven by the simulated clock
+	let board_ticker = null;    // in-world price list on the market board
+	let board_flash = null;     // overlay tinted green/red on a shock move
+	// A single-step move this large is a scripted news shock rather than drift:
+	// ordinary ticks in this sim run about ±0.25%. The headline *text* is not
+	// available to the frontend -- trading_log.json records market_prices only,
+	// never the event -- so the board reports the move, not the story.
+	const SHOCK_PCT = 2.0;
 	let movement_target = {};   // per-agent goal tile [tx, ty]
 	let movement_path = {};     // per-agent remaining waypoints, in tiles
+	let walk_speed = {};        // per-agent px/frame, fixed per trip in set_target()
 	let current_tile = {};      // per-agent logical tile (authoritative for pathing)
 	let last_facing = {};
 	let walkable = null;        // [y][x] bool, built from the map's Collisions layer
 	let map_w = 0, map_h = 0;
-	const movement_speed = 2;   // px/frame, in map (unzoomed) pixels
+	const movement_speed = 2;   // px/frame floor, in map (unzoomed) pixels
+	// Phaser runs at 60fps, so this is how many frames a replay step lasts --
+	// the budget a walk has to complete in before render_step() re-targets.
+	const FRAMES_PER_STEP = STEP_MS / 1000 * 60;
+
+	// ZOOM -- the canvas backing store stays 1408x1024 (the whole map at 2x) no
+	// matter what, so changing only the *camera* zoom crops the view without
+	// costing any pixel-art sharpness. 2x is the floor because that is exactly
+	// "whole map fills the panel"; below it we'd render void around the edges.
+	const ZOOM_MIN = 2, ZOOM_MAX = 6, ZOOM_STEP = 0.5;
+	let zoom_level = ZOOM;
+	let main_camera = null;
+	let user_panned = false;    // viewer has dragged; stop auto-framing the bullpen
+	// Where to look when zoomed past fit. The map's geometric centre is row 16 --
+	// the dividing wall -- so centring there would frame an empty corridor. The
+	// bullpen (desks y=8, market board y=4, meeting row y=9) is the only band
+	// agents ever occupy, so that is what a zoomed-in view should hold.
+	const FOCUS_TILE = [23, 6];
 
 	let selected_key = null;
 	let log_filter = null;      // underscore key, or null for "all agents"
@@ -89,9 +145,21 @@
 			  										  		     "{% static 'assets/characters/atlas.json' %}");
 			{% endwith %}
 	  {% endfor %}
+
+	  // Background staff. The office ships 28 character sheets and the sim only
+	  // has three traders, so the other 25 are free set dressing -- six of them
+	  // fill the desk clusters nobody sits at. They share the persona atlas
+	  // layout, so no new art and no new frame names.
+	  this.load.atlas("npc_abigail", "{% static 'assets/characters/Abigail_Chen.png' %}", "{% static 'assets/characters/atlas.json' %}");
+	  this.load.atlas("npc_adam",    "{% static 'assets/characters/Adam_Smith.png' %}",   "{% static 'assets/characters/atlas.json' %}");
+	  this.load.atlas("npc_eddy",    "{% static 'assets/characters/Eddy_Lin.png' %}",     "{% static 'assets/characters/atlas.json' %}");
+	  this.load.atlas("npc_jennifer","{% static 'assets/characters/Jennifer_Moore.png' %}","{% static 'assets/characters/atlas.json' %}");
+	  this.load.atlas("npc_rajiv",   "{% static 'assets/characters/Rajiv_Patel.png' %}",  "{% static 'assets/characters/atlas.json' %}");
+	  this.load.atlas("npc_tamara",  "{% static 'assets/characters/Tamara_Taylor.png' %}","{% static 'assets/characters/atlas.json' %}");
 	}
 
 	function create() {
+	  game_scene = this;
 	  const map = this.make.tilemap({ key: "map" });
 
 	  // Tileset names must match office.json's "tilesets"[].name exactly.
@@ -124,10 +192,31 @@
 	    walkable.push(row);
 	  }
 
-	  // Whole floor at 2x, no scrolling -- the point is watching all three at once.
+	  // Whole floor at 2x by default -- the point is watching all three at once.
+	  // The +/- buttons crop in from there via apply_zoom().
 	  const camera = this.cameras.main;
+	  main_camera = camera;
+	  // Without bounds the camera would happily scroll past the map edge and
+	  // render backgroundColor void once zoomed in near a corner.
+	  camera.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
 	  camera.setZoom(ZOOM);
 	  camera.centerOn(map.widthInPixels / 2, map.heightInPixels / 2);
+	  apply_zoom(zoom_level);
+
+	  // DRAG TO PAN. Zooming in crops to the bullpen, which used to make the
+	  // rest of the floor unreachable -- the lounge where meetings happen, the
+	  // break area, the staff downstairs. Bounds are already set, so Phaser
+	  // clamps the scroll and you can never drag off the map.
+	  this.input.on("pointermove", function (pointer) {
+	    if (!pointer.isDown || zoom_level <= ZOOM) return;   // nothing to pan at fit
+	    camera.scrollX -= (pointer.x - pointer.prevPosition.x) / camera.zoom;
+	    camera.scrollY -= (pointer.y - pointer.prevPosition.y) / camera.zoom;
+	    // Remember that the view is now the viewer's choice, so a subsequent
+	    // +/- does not yank them back to the bullpen.
+	    user_panned = true;
+	  });
+	  this.input.on("pointerdown", function () { set_pan_cursor(true); });
+	  this.input.on("pointerup",   function () { set_pan_cursor(false); });
 
 	  // Label the presentation-screen bank agents walk to on a real BUY/SELL
 	  // (game object 32147 in the map's matrix; see sim_data.MARKET_BOARD_TILE).
@@ -136,6 +225,40 @@
 	    fontFamily: "monospace", fontSize: "7px", color: "#0b0e14",
 	    backgroundColor: "#4d9fff", padding: {x: 3, y: 2}
 	  }).setOrigin(0.5, 0).setDepth(5).setResolution(3);
+
+	  // THE BOARD ITSELF. Previously this was a label and nothing else -- agents
+	  // walked to a caption. Now the live prices are rendered in-world, so the
+	  // thing they walk to actually shows what they walked over to look at, and
+	  // the ticker at the top of the page is no longer the only place a price
+	  // exists. Anchored bottom-centre so it grows upward onto the wall above
+	  // the screens instead of down over the agents standing at the board.
+	  board_flash = this.add.rectangle(board_px[0], board_px[1] - 40, 108, 46, 0xffffff, 0);
+	  board_flash.setDepth(4);
+	  board_ticker = this.add.text(board_px[0], board_px[1] - 34, "", {
+	    fontFamily: "monospace", fontSize: "5px", color: "#9aa4b5",
+	    backgroundColor: "#0b0e14dd", padding: {x: 4, y: 3},
+	    align: "left", lineSpacing: 1
+	  }).setOrigin(0.5, 1).setDepth(5).setResolution(3);
+
+	  // Label the vending-machine bank, the same way the market board is
+	  // labelled. Without it an agent parked down here just looks lost.
+	  const break_px = tile_to_px(break_room_tile[0], break_room_tile[1]);
+	  // Sits on the empty row above the machines: the agents' floating labels
+	  // occupy roughly y-10..y-24 off their heads, so anything lower collides
+	  // with a "✗ rejected" the moment someone takes a break after a rejection.
+	  this.add.text(break_px[0] + 16, break_px[1] - 52, "☕ BREAK AREA", {
+	    fontFamily: "monospace", fontSize: "7px", color: "#0b0e14",
+	    backgroundColor: "#c9a227", padding: {x: 3, y: 2}
+	  }).setOrigin(0.5, 0).setDepth(5).setResolution(3);
+
+	  // DAYLIGHT. A wash over the whole floor, driven by the simulated clock the
+	  // topbar already shows: cool at the 09:30 open, neutral midday, warm into
+	  // the afternoon. Kept under 0.15 alpha so it reads as light rather than as
+	  // a filter, and so the red/green overlays stay legible through it.
+	  light_overlay = this.add.rectangle(
+	    map.widthInPixels / 2, map.heightInPixels / 2,
+	    map.widthInPixels, map.heightInPixels, 0x5b8bd0, 0);
+	  light_overlay.setDepth(8);
 
 	  // Selection ring, parked off-screen until a card is clicked.
 	  select_ring = this.add.circle(-100, -100, 10);
@@ -151,6 +274,8 @@
 	    // each other into an unreadable "Marcus Sara Kim".
 	    const plate_dy = 2 + (agent_index % 3) * 7;
 	    plate_offset[key] = plate_dy;
+	    const idx = agent_index;
+	    agent_order[key] = idx;
 	    agent_index += 1;
 	    // Starting tile: wherever this agent's real record says they are at the
 	    // initial step. Nothing has been polled yet, so this falls back to the
@@ -165,6 +290,23 @@
 	    sprite.scaleY = sprite.scaleX;
 	    sprite.setDepth(2);
 	    personas[key] = sprite;
+
+	    // BREATHING -- the atlas has no idle animation (20 frames: 4 standing
+	    // poses + 4 walk cycles), and in live mode a step takes minutes, so
+	    // without this the floor is a still image the overwhelming majority of
+	    // the time and a healthy run looks identical to a crashed one.
+	    // scaleY only: update() writes x/y every frame, so tweening either
+	    // would fight the walk loop. Durations are staggered per agent because
+	    // three sprites pulsing in lockstep reads as a glitch, not as life.
+	    this.tweens.add({
+	      targets: sprite,
+	      scaleY: sprite.scaleY * 1.06,
+	      duration: 1400 + idx * 190,
+	      yoyo: true,
+	      repeat: -1,
+	      ease: "Sine.easeInOut"
+	    });
+
 	    current_tile[key] = [pos[0], pos[1]];
 	    movement_target[key] = [pos[0], pos[1]];
 	    movement_path[key] = [];
@@ -205,7 +347,121 @@
 	    anims.create({key: key + "-up-walk", frames: anims.generateFrameNames(key, {prefix: "up-walk.", start: 0, end: 3, zeroPad: 3}), frameRate: 8, repeat: -1});
 	  }
 
+	  spawn_npcs(this);
 	  render_step(step);
+	}
+
+	// ------------------------------------------------------------- ambient NPCs
+	function spawn_npcs(scene) {
+	  for (const route of NPC_ROUTES) {
+	    const key = route.key;
+	    if (!scene.textures.exists(key)) continue;   // sheet missing: just skip
+	    const px = tile_to_px(route.home[0], route.home[1]);
+	    const sprite = scene.add.sprite(px[0], px[1], key, "down");
+	    sprite.displayWidth = 20;
+	    sprite.scaleY = sprite.scaleX;
+	    sprite.setDepth(1);        // under the traders (depth 2)
+	    sprite.setAlpha(0.55);     // and visibly muted, so they read as scenery
+
+	    for (const d of ["left", "right", "down", "up"]) {
+	      const anim_key = key + "-" + d + "-walk";
+	      if (!scene.anims.exists(anim_key)) {
+	        scene.anims.create({
+	          key: anim_key,
+	          frames: scene.anims.generateFrameNames(key, {prefix: d + "-walk.", start: 0, end: 3, zeroPad: 3}),
+	          frameRate: 6, repeat: -1
+	        });
+	      }
+	    }
+
+	    const at_desk = route.role === "desk";
+	    // Desk staff face their monitor, which is the tile directly above them.
+	    const facing = at_desk ? "up" : "down";
+	    sprite.setTexture(key, facing);
+
+	    // A quicker pulse than the traders' 1400ms breathing, so a working NPC
+	    // reads as busy at a keyboard rather than merely alive. Roamers get the
+	    // slow version so they are never a frozen cut-out between walks.
+	    scene.tweens.add({
+	      targets: sprite,
+	      scaleY: sprite.scaleY * (at_desk ? 1.045 : 1.05),
+	      duration: (at_desk ? 620 : 1500) + Math.random() * 320,
+	      yoyo: true, repeat: -1, ease: "Sine.easeInOut"
+	    });
+
+	    npcs[key] = {
+	      sprite: sprite, route: route, tile: [route.home[0], route.home[1]],
+	      path: [], facing: facing, role: route.role,
+	      // Stagger the first departure so all six don't set off on the same
+	      // frame, which would read as a chorus line rather than an office.
+	      wait: at_desk ? 6000 + Math.random() * 12000 : 400 + Math.random() * 1800
+	    };
+	  }
+	}
+
+	function update_npcs(delta) {
+	  for (const key in npcs) {
+	    const n = npcs[key];
+	    let dir = null;
+
+	    if (n.path.length) {
+	      const [wx, wy] = n.path[0];
+	      const [tx, ty] = tile_to_px(wx, wy);
+	      if (n.sprite.x < tx)      { n.sprite.x = Math.min(n.sprite.x + NPC_SPEED, tx); dir = "right"; }
+	      else if (n.sprite.x > tx) { n.sprite.x = Math.max(n.sprite.x - NPC_SPEED, tx); dir = "left"; }
+	      else if (n.sprite.y < ty) { n.sprite.y = Math.min(n.sprite.y + NPC_SPEED, ty); dir = "down"; }
+	      else if (n.sprite.y > ty) { n.sprite.y = Math.max(n.sprite.y - NPC_SPEED, ty); dir = "up"; }
+	      if (n.sprite.x === tx && n.sprite.y === ty) { n.tile = [wx, wy]; n.path.shift(); }
+	    } else {
+	      // Idle. The pause is what makes them look like people rather than
+	      // patrolling guards.
+	      n.wait -= delta;
+	      if (n.wait <= 0) {
+	        const stops = n.route.stops;
+	        const home = n.route.home;
+	        if (n.role === "desk") {
+	          if (n.tile[0] !== home[0] || n.tile[1] !== home[1]) {
+	            n.path = find_path(n.tile, home);      // errand over, back to work
+	            n.wait = 5000 + Math.random() * 7000;
+	          } else if (Math.random() < 0.22 && stops.length) {
+	            // Occasional trip away from the desk -- infrequent on purpose.
+	            n.path = find_path(n.tile, stops[Math.floor(Math.random() * stops.length)]);
+	            n.wait = 4000 + Math.random() * 5000;
+	          } else {
+	            // Glance away from the monitor and back. With no sit or type
+	            // frames in the atlas this is the only "at work" motion
+	            // available, and it is enough to stop them looking like props.
+	            const looks = ["up", "up", "up", "left", "right"];
+	            n.facing = looks[Math.floor(Math.random() * looks.length)];
+	            n.sprite.setTexture(key, n.facing);
+	            n.wait = 3000 + Math.random() * 6000;
+	          }
+	        } else {
+	          const dest = stops[Math.floor(Math.random() * stops.length)];
+	          if (dest[0] !== n.tile[0] || dest[1] !== n.tile[1]) {
+	            n.path = find_path(n.tile, dest);
+	          }
+	          n.wait = 2500 + Math.random() * 6000;
+	        }
+	      }
+	    }
+
+	    if (dir) {
+	      n.sprite.anims.play(key + "-" + dir + "-walk", true);
+	      n.facing = dir;
+	    } else if (n.sprite.anims.isPlaying) {
+	      n.sprite.anims.stop();
+	      // Coming to rest at the workstation means facing the monitor, not
+	      // keeping whichever way the last step of the walk happened to point.
+	      // This has to run here rather than on arrival: the walk branch sets
+	      // n.facing = dir on that same frame and would overwrite it.
+	      if (n.role === "desk" &&
+	          n.tile[0] === n.route.home[0] && n.tile[1] === n.route.home[1]) {
+	        n.facing = "up";
+	      }
+	      n.sprite.setTexture(key, n.facing);
+	    }
+	  }
 	}
 
 	// ###########################################################################
@@ -226,7 +482,21 @@
 
 	function find_path(start, goal) {
 	  if (start[0] === goal[0] && start[1] === goal[1]) return [];
-	  if (!is_walkable(goal[0], goal[1])) return [];
+	  if (!is_walkable(goal[0], goal[1])) {
+	    // Chairs are solid -- you cannot route THROUGH someone's seat -- but an
+	    // agent has to be able to sit in their own. Walk to the tile beside it
+	    // and take one last step in. Only the final tile may be solid; nothing
+	    // else about the pathfinding changes.
+	    let best = null;
+	    for (const n of [[goal[0] - 1, goal[1]], [goal[0] + 1, goal[1]],
+	                     [goal[0], goal[1] - 1], [goal[0], goal[1] + 1]]) {
+	      if (!is_walkable(n[0], n[1])) continue;
+	      if (start[0] === n[0] && start[1] === n[1]) { best = []; break; }
+	      const p = find_path(start, n);
+	      if (p.length && (best === null || p.length < best.length)) best = p;
+	    }
+	    return best === null ? [] : best.concat([goal]);
+	  }
 
 	  const key_of = (x, y) => y * map_w + x;
 	  const came_from = new Map();
@@ -265,9 +535,16 @@
 	  if (cur_target && cur_target[0] === tile[0] && cur_target[1] === tile[1]) return;
 	  movement_target[key] = [tile[0], tile[1]];
 	  movement_path[key] = find_path(current_tile[key], tile);
+	  // Fix the pace for the whole trip up front, from its full length. Deriving
+	  // it per-frame from the *remaining* path instead makes the agent decelerate
+	  // as it closes in, which turns a 33-tile walk to the lounge into a 2-step
+	  // journey rather than the 1 step it is budgeted for.
+	  walk_speed[key] = Math.max(movement_speed,
+	                             movement_path[key].length * TILE / FRAMES_PER_STEP);
 	}
 
-	function update() {
+	function update(time, delta) {
+	  update_npcs(delta || 16);
 	  for (const key in personas) {
 	    const sprite = personas[key];
 	    const path = movement_path[key];
@@ -276,11 +553,15 @@
 	    if (path && path.length) {
 	      const [wx, wy] = path[0];
 	      const [tx, ty] = tile_to_px(wx, wy);
+	      // Pace was fixed for the whole trip in set_target(); short hops keep the
+	      // base speed, long ones (the ~33-tile walk to the lounge) go faster so
+	      // they still arrive inside one step.
+	      const speed = walk_speed[key] || movement_speed;
 
-	      if (sprite.x < tx) { sprite.x = Math.min(sprite.x + movement_speed, tx); dir = "right"; }
-	      else if (sprite.x > tx) { sprite.x = Math.max(sprite.x - movement_speed, tx); dir = "left"; }
-	      else if (sprite.y < ty) { sprite.y = Math.min(sprite.y + movement_speed, ty); dir = "down"; }
-	      else if (sprite.y > ty) { sprite.y = Math.max(sprite.y - movement_speed, ty); dir = "up"; }
+	      if (sprite.x < tx) { sprite.x = Math.min(sprite.x + speed, tx); dir = "right"; }
+	      else if (sprite.x > tx) { sprite.x = Math.max(sprite.x - speed, tx); dir = "left"; }
+	      else if (sprite.y < ty) { sprite.y = Math.min(sprite.y + speed, ty); dir = "down"; }
+	      else if (sprite.y > ty) { sprite.y = Math.max(sprite.y - speed, ty); dir = "up"; }
 
 	      if (sprite.x === tx && sprite.y === ty) {
 	        current_tile[key] = [wx, wy];
@@ -348,6 +629,136 @@
 	    if (bucket && full_name in bucket) return bucket[full_name];
 	  }
 	  return null;
+	}
+
+	// Tint the floor by time of day. Hours are the simulated clock's, not the
+	// viewer's. A 200-step run at sec_per_step=60 spans 09:30 to about 12:50,
+	// so in practice this is a slow cool-to-neutral drift rather than a sunset --
+	// the warm end only appears on runs long enough to reach the afternoon.
+	function render_light(dt) {
+	  if (!light_overlay) return;
+	  const h = dt.getHours() + dt.getMinutes() / 60;
+	  let color, alpha;
+	  if (h < 11) {
+	    color = 0x5b8bd0;                                   // early, cool
+	    alpha = 0.13 * Math.max(0, (11 - Math.max(h, 9.5)) / 1.5);
+	  } else if (h < 14) {
+	    color = 0xffffff;                                   // midday, flat
+	    alpha = 0.02;
+	  } else {
+	    color = 0xff9a3c;                                   // afternoon, warm
+	    alpha = 0.14 * Math.min((h - 14) / 2, 1);
+	  }
+	  light_overlay.fillColor = color;
+	  light_overlay.setAlpha(alpha);
+	}
+
+	// Draw the in-world board and return the biggest single-step move, so the
+	// caller can decide whether the room should react to it.
+	function render_board() {
+	  if (!board_ticker) return null;
+	  const prices = market_prices_by_step[step] || {};
+	  const prev = market_prices_by_step[step - 1] || {};
+	  const lines = [];
+	  let shock = null;
+
+	  for (const sym in prices) {
+	    const px = Number(prices[sym]);
+	    const was = prev[sym] != null ? Number(prev[sym]) : null;
+	    let mark = "  ", pct = "";
+	    if (was != null && was !== 0) {
+	      const d_pct = (px - was) / was * 100;
+	      if (Math.abs(d_pct) >= 0.005) {
+	        mark = d_pct > 0 ? "▲" : "▼";
+	        pct = (d_pct > 0 ? "+" : "") + d_pct.toFixed(1);
+	      }
+	      if (Math.abs(d_pct) >= SHOCK_PCT &&
+	          (shock === null || Math.abs(d_pct) > Math.abs(shock.pct))) {
+	        shock = {symbol: sym, pct: d_pct};
+	      }
+	    }
+	    // Pad so the columns line up in the monospace face.
+	    lines.push(sym.padEnd(6) + px.toFixed(2).padStart(7) + " " + mark + pct);
+	  }
+
+	  board_ticker.setText(lines.length ? lines.join("\n") : "awaiting market data");
+
+	  if (shock) {
+	    // Name the mover in the header line -- with no headline text available
+	    // this is the most the board can honestly say about what just happened.
+	    board_ticker.setText(
+	      shock.symbol + " " + (shock.pct > 0 ? "▲" : "▼") +
+	      Math.abs(shock.pct).toFixed(1) + "%\n" + lines.join("\n"));
+	    flash_board(shock.pct > 0);
+	  }
+	  return shock;
+	}
+
+	// Rising, fading text over an agent's head. An order executing used to
+	// produce no visible event at all -- the sprite simply stood at the board --
+	// so a fill, and a request the filter refused, looked exactly alike.
+	function float_text(key, text, color) {
+	  const sprite = personas[key];
+	  if (!sprite || !game_scene) return;
+	  // Offset to the agent's right and staggered per agent. Several traders
+	  // routinely act on the same step and stand shoulder to shoulder at the
+	  // board, so centring these over the head stacks them into an unreadable
+	  // pile -- and floating them straight up puts them through the board's
+	  // own price list.
+	  const order = agent_order[key] || 0;
+	  const ox = 18 + order * 4;
+	  const oy = -10 - order * 9;
+	  // At most one live float per agent. The fade lasts about as long as a
+	  // replay step, so an agent trading on consecutive steps otherwise stacks
+	  // labels on the same spot and they smear into an unreadable overprint.
+	  if (active_float[key]) {
+	    game_scene.tweens.killTweensOf(active_float[key]);
+	    active_float[key].destroy();
+	  }
+	  const t = game_scene.add.text(sprite.x + ox, sprite.y + oy, text, {
+	    fontFamily: "monospace", fontSize: "7px", color: color,
+	    backgroundColor: "#0b0e14cc", padding: {x: 2, y: 1}
+	  }).setOrigin(0, 1).setDepth(7).setResolution(3);
+	  active_float[key] = t;
+	  game_scene.tweens.add({
+	    targets: t, y: t.y - 14, alpha: 0, duration: 1600, ease: "Quad.easeOut",
+	    onComplete: function () {
+	      if (active_float[key] === t) active_float[key] = null;
+	      t.destroy();                              // or they accumulate forever
+	    }
+	  });
+	}
+
+	// What, if anything, this step's decision should announce over the agent.
+	function trade_float(rec) {
+	  if (!rec) return null;
+	  // A request the filter refused is the single most informative thing the
+	  // map can show -- it is the whole point of the middleware -- and it is
+	  // invisible otherwise, because the substituted HOLD leaves the agent at
+	  // their desk looking exactly like someone who chose not to trade.
+	  if (rec.hallucination) {
+	    // Reasons run long ("quantity outside legal limit"); over a 16px sprite
+	    // anything past ~20 chars runs off into the furniture. The full text is
+	    // in the detail panel and the decision log.
+	    let why = rec.error_reason || "rejected";
+	    if (why.length > 20) why = why.slice(0, 19) + "…";
+	    return {text: "✗ " + why, color: "#ff5d5d"};
+	  }
+	  const d = rec.description || "";
+	  if (d.startsWith("BUY"))  return {text: d.replace(/^BUY\s*/, "+"), color: "#3ddc84"};
+	  if (d.startsWith("SELL")) return {text: d.replace(/^SELL\s*/, "−"), color: "#ffb454"};
+	  return null;
+	}
+
+	function flash_board(is_up) {
+	  if (!board_flash || !board_flash.scene) return;
+	  const scene = board_flash.scene;
+	  board_flash.fillColor = is_up ? 0x3ddc84 : 0xff5d5d;
+	  scene.tweens.killTweensOf(board_flash);
+	  board_flash.setAlpha(0.55);
+	  scene.tweens.add({
+	    targets: board_flash, alpha: 0, duration: 900, ease: "Quad.easeOut"
+	  });
 	}
 
 	function render_ticker() {
@@ -535,12 +946,31 @@
 	  el("game-time-content").textContent = dt.toLocaleString(
 	    "en-US", {weekday: "short", hour: "2-digit", minute: "2-digit"});
 
+	  render_light(dt);
 	  render_ticker();
+	  const shock = render_board();
 	  render_interaction();
 
 	  for (const key in personas) {
 	    const rec = get_record(step, key);
 	    if (rec && rec.movement) set_target(key, rec.movement);
+	    // On a shock, anyone standing still looks up at the board. update() only
+	    // repaints facing for idle sprites, so this never fights the walk cycle.
+	    if (shock && !(movement_path[key] || []).length) last_facing[key] = "up";
+	    // At the break area the machines are the row directly above, so face
+	    // them -- an agent stood with their back to the machine reads as
+	    // loitering rather than as getting a coffee.
+	    if (rec && rec.on_break && !(movement_path[key] || []).length) last_facing[key] = "up";
+	    // Seated at their own desk: face the monitor on the row above, not
+	    // whichever direction the walk back happened to end on.
+	    if (rec && rec.at_desk && !(movement_path[key] || []).length) last_facing[key] = "up";
+
+	    // Announce the decision -- but only from a record belonging to THIS step.
+	    // get_record() walks backwards to the nearest earlier entry, so keying
+	    // off it would re-announce one old trade on every subsequent step.
+	    const own = (all_movement[step] || {})[key.replace(/_/g, " ")];
+	    const float = trade_float(own);
+	    if (float) float_text(key, float.text, float.color);
 	    if (pronunciatios[key]) pronunciatios[key].setText(rec ? rec.pronunciatio : "");
 
 	    // Conversation text over the head only on steps the agent is really
@@ -636,9 +1066,49 @@
 	  el("play_button").textContent = "▶ Play";
 	}
 
+	// ------------------------------------------------------------------ zoom
+	// Only the camera scale changes; the canvas backing store is fixed at
+	// 1408x1024, so zooming in crops rather than resamples and the pixel art
+	// stays sharp at every level.
+	function apply_zoom(z) {
+	  zoom_level = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+	  const readout = el("zoom_readout");
+	  if (readout) readout.textContent = zoom_level.toFixed(1) + "×";
+	  // Buttons go dead at the ends rather than silently doing nothing.
+	  const out_btn = el("zoom_out_button"), in_btn = el("zoom_in_button");
+	  if (out_btn) out_btn.disabled = zoom_level <= ZOOM_MIN;
+	  if (in_btn)  in_btn.disabled  = zoom_level >= ZOOM_MAX;
+
+	  if (!main_camera) return;
+	  main_camera.setZoom(zoom_level);
+	  if (zoom_level <= ZOOM) {
+	    // Back at fit the whole floor is visible, so any pan is meaningless --
+	    // recentre and forget it, which doubles as the "I'm lost" reset.
+	    user_panned = false;
+	    main_camera.centerOn(map_w * TILE / 2, map_h * TILE / 2);
+	  } else if (!user_panned) {
+	    // First zoom in: frame the bullpen. The map's geometric centre is the
+	    // dividing wall on row 16, so centring there shows an empty corridor.
+	    main_camera.centerOn(FOCUS_TILE[0] * TILE + TILE / 2,
+	                         FOCUS_TILE[1] * TILE + TILE / 2);
+	  }
+	  // else: the viewer has dragged somewhere deliberately -- keep their view
+	  // and just change the scale around it.
+	  set_pan_cursor(false);
+	}
+
+	// Only advertise dragging when there is somewhere to drag to.
+	function set_pan_cursor(dragging) {
+	  const canvas = document.querySelector("#game-container canvas");
+	  if (!canvas) return;
+	  canvas.style.cursor = zoom_level > ZOOM ? (dragging ? "grabbing" : "grab") : "default";
+	}
+
 	document.addEventListener("DOMContentLoaded", function () {
 	  el("play_button").onclick = play_replay;
 	  el("pause_button").onclick = pause_replay;
+	  el("zoom_in_button").onclick  = function () { apply_zoom(zoom_level + ZOOM_STEP); };
+	  el("zoom_out_button").onclick = function () { apply_zoom(zoom_level - ZOOM_STEP); };
 	  el("prev_button").onclick = function () { pause_replay(); render_step(step - 1); };
 	  el("next_button").onclick = function () { pause_replay(); render_step(step + 1); };
 	  el("step_slider").oninput = function (e) {
@@ -668,6 +1138,9 @@
 	    if (e.key === "ArrowLeft")  { pause_replay(); render_step(step - 1); }
 	    if (e.key === "ArrowRight") { pause_replay(); render_step(step + 1); }
 	    if (e.key === " ") { e.preventDefault(); play_interval ? pause_replay() : play_replay(); }
+	    // "=" is the unshifted key on the same cap as "+", so accept both.
+	    if (e.key === "+" || e.key === "=") { apply_zoom(zoom_level + ZOOM_STEP); }
+	    if (e.key === "-" || e.key === "_") { apply_zoom(zoom_level - ZOOM_STEP); }
 	  });
 
 	  update_live_badge();

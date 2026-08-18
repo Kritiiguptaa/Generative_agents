@@ -28,6 +28,7 @@ urlpatterns = [
     url(r'^replay/(?P<sim_code>[\w-]+)/(?P<step>[\w-]+)/$', translator_views.replay, name='replay'),
     url(r'^replay_persona_state/(?P<sim_code>[\w-]+)/(?P<step>[\w-]+)/(?P<persona_name>[\w-]+)/$', translator_views.replay_persona_state, name='replay_persona_state'),
     url(r'^map/(?P<sim_code>[\w-]+)/(?P<step>[\w-]+)/$', translator_views.trading_map, name='trading_map'),
+    url(r'^run/(?P<sim_code>[\w-]+)/$', translator_views.run_explorer, name='run_explorer'),
     url(r'^trading_poll/(?P<sim_code>[\w-]+)/$', translator_views.trading_poll, name='trading_poll'),
     url(r'^trading_persona_state/(?P<sim_code>[\w-]+)/(?P<step>[\w-]+)/(?P<persona_name>[\w-]+)/$', translator_views.trading_persona_state, name='trading_persona_state'),
     url(r'^process_environment/$', translator_views.process_environment, name='process_environment'),

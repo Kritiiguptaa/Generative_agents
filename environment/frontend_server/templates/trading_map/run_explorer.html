@@ -1,0 +1,437 @@
+{% load staticfiles %}<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>{{ sim_code }} — Run Explorer</title>
+	<link rel="stylesheet" href="{% static 'css/trading_ui.css' %}">
+	<link rel="stylesheet" href="{% static 'css/run_explorer.css' %}">
+</head>
+<body>
+
+<div class="topbar">
+	<div class="brand">AGENT<span>ANCHOR</span></div>
+	<span class="chip">{{ sim_code }}</span>
+	{% if middleware_enabled is not None %}
+		<span class="arm-badge {% if middleware_enabled %}arm-mw{% else %}arm-base{% endif %}">
+			{% if middleware_enabled %}MIDDLEWARE{% else %}BASELINE{% endif %}
+		</span>
+	{% else %}
+		<span class="arm-badge arm-unknown">ARM UNKNOWN</span>
+	{% endif %}
+	<div class="spacer"></div>
+	<a class="btn" href="/map/{{ sim_code }}/{{ first_step }}/">▶ Open map</a>
+	<a class="btn" href="/">All runs</a>
+	{% if is_running %}<span class="live-dot"></span><span class="chip">LIVE</span>{% endif %}
+</div>
+
+<!-- ============================================================ identity -->
+<div class="rx-wrap">
+
+	<section class="rx-ident">
+		<div>
+			<div class="rx-ident-label">Run</div>
+			<div class="rx-ident-value">{{ sim_code }}</div>
+		</div>
+		<div>
+			<div class="rx-ident-label">Condition</div>
+			<div class="rx-ident-value {% if middleware_enabled %}v-mw{% else %}v-base{% endif %}">
+				{% if middleware_enabled is not None %}
+					{% if middleware_enabled %}middleware{% else %}baseline{% endif %}
+				{% else %}unknown{% endif %}
+			</div>
+		</div>
+		<div>
+			<div class="rx-ident-label">Steps</div>
+			<div class="rx-ident-value">{{ report.simulation_steps|default:last_step }}</div>
+		</div>
+		<div>
+			<div class="rx-ident-label">Model</div>
+			<div class="rx-ident-value {% if not model_name %}v-missing{% endif %}">
+				{% if model_name %}{{ model_name }}{% else %}not recorded{% endif %}
+			</div>
+		</div>
+		<div>
+			<div class="rx-ident-label">Seed</div>
+			<div class="rx-ident-value {% if seed is None %}v-missing{% endif %}">
+				{% if seed is not None %}{{ seed }}{% else %}not recorded{% endif %}
+			</div>
+		</div>
+		<div>
+			<div class="rx-ident-label">Decisions</div>
+			<div class="rx-ident-value">{{ report.total_decisions|default:"—" }}</div>
+		</div>
+	</section>
+
+	{% if not model_name or seed is None %}
+	<div class="rx-warn">
+		<b>This run does not record which model or seed produced it.</b>
+		Two runs from different models are indistinguishable after the fact, so
+		figures from this page must not be compared against another run without
+		checking how each was launched. See CHANGES §22 item&nbsp;2.
+	</div>
+	{% endif %}
+
+	{% if not has_report %}
+	<div class="rx-warn">
+		<b>No <code>hallucination_report.json</code> yet.</b>
+		The report is written when the run finishes, so the headline figures below
+		are empty. The event timeline and decision records are built from
+		<code>trading_log.json</code> and are already populated.
+	</div>
+	{% endif %}
+
+	<!-- ==================================================== the headline -->
+	<section class="panel rx-headline">
+		<div class="panel-head">
+			<span>Disposition — what was caught, and what got through</span>
+			<div class="spacer"></div>
+			{% if headline.derived %}
+				<span class="chip chip-warn">derived from the log — no report yet</span>
+			{% else %}
+				<span class="chip">the comparison that is valid</span>
+			{% endif %}
+		</div>
+		<div class="panel-body">
+			<div class="rx-disp">
+				<div class="rx-disp-cell">
+					<div class="rx-disp-num good">{{ headline.caught|default:0 }}</div>
+					<div class="rx-disp-lab">caught before execution</div>
+					<div class="rx-disp-sub">the model asked, the filter refused</div>
+				</div>
+				<div class="rx-disp-cell">
+					<div class="rx-disp-num {% if headline.executed %}bad{% else %}good{% endif %}">
+						{{ headline.executed|default:0 }}
+					</div>
+					<div class="rx-disp-lab">executed malformed</div>
+					<div class="rx-disp-sub">got through and hit the book</div>
+				</div>
+				<div class="rx-disp-cell">
+					<div class="rx-disp-num">{{ headline.attempts|default:0 }}</div>
+					<div class="rx-disp-lab">trade attempts</div>
+					<div class="rx-disp-sub">the denominator — what was <i>requested</i></div>
+				</div>
+				<div class="rx-disp-cell">
+					<div class="rx-disp-num">
+						{% if headline.rate is not None %}{{ headline.rate }}%{% else %}N/A{% endif %}
+					</div>
+					<div class="rx-disp-lab">hallucination rate</div>
+					<div class="rx-disp-sub">read alongside trade attempts, never alone</div>
+				</div>
+			</div>
+			<p class="rx-note">
+				A rate can be improved simply by trading less — <code>hold</code> is legal
+				by construction. The two counts on the left are the honest claim:
+				<b>how many infeasible requests were stopped, and how many reached the book.</b>
+			</p>
+		</div>
+	</section>
+
+	<!-- ================================================ secondary metrics -->
+	<section class="rx-metrics">
+		<div class="rx-metric">
+			<div class="rx-metric-num">{{ report.total_hallucination_episodes|default:0 }}</div>
+			<div class="rx-metric-lab">distinct episodes</div>
+			<div class="rx-metric-sub">a big gap vs raw count means an agent is livelocked</div>
+		</div>
+		<div class="rx-metric">
+			<div class="rx-metric-num">{{ report.total_state_contradictions|default:0 }}</div>
+			<div class="rx-metric-lab">state contradictions</div>
+			<div class="rx-metric-sub">the only detector that scores a HOLD</div>
+		</div>
+		<div class="rx-metric">
+			<div class="rx-metric-num">{{ event_count }}</div>
+			<div class="rx-metric-lab">timeline events</div>
+			<div class="rx-metric-sub">trades, catches, shocks, meetings</div>
+		</div>
+		<div class="rx-metric">
+			<div class="rx-metric-num">
+				{% if compression %}{{ compression.nodes_in }}→{{ compression.nodes_out }}{% else %}—{% endif %}
+			</div>
+			<div class="rx-metric-lab">memory compression</div>
+			<div class="rx-metric-sub">
+				{% if compression %}avg nodes per decision ({{ compression.samples }} samples){% else %}not recorded in this run{% endif %}
+			</div>
+		</div>
+	</section>
+
+	<!-- ==================================================== main two-col -->
+	<div class="rx-cols">
+
+		<!-- ------------------------------------------------- timeline -->
+		<section class="panel">
+			<div class="panel-head">
+				<span>Event timeline</span>
+				<div class="spacer"></div>
+				<span class="chip" id="ev_count">{{ event_count }} events</span>
+			</div>
+			<div class="rx-filters">
+				<button class="rx-fbtn active" data-kind="all">All</button>
+				<button class="rx-fbtn danger" data-kind="hallucination">Hallucinations</button>
+				<button class="rx-fbtn" data-kind="trade">Trades</button>
+				<button class="rx-fbtn" data-kind="shock">News shocks</button>
+				<button class="rx-fbtn" data-kind="interaction">Meetings</button>
+				<button class="rx-fbtn" data-kind="idle">Idle streaks</button>
+				<select class="rx-select" id="ev_agent">
+					<option value="">every agent</option>
+					{% for n in persona_names %}<option value="{{ n }}">{{ n }}</option>{% endfor %}
+				</select>
+			</div>
+			<div class="rx-timeline" id="ev_list"></div>
+		</section>
+
+		<!-- ------------------------------------------------ inspector -->
+		<section class="panel rx-sticky">
+			<div class="panel-head">
+				<span>Decision inspector</span>
+				<div class="spacer"></div>
+				<span class="chip" id="insp_step">—</span>
+			</div>
+			<div class="panel-body" id="insp_body">
+				<div class="detail-empty">
+					Select an event to see the full record: what the model
+					<i>requested</i>, what it was permitted to do, and the book at
+					that moment.
+				</div>
+			</div>
+		</section>
+	</div>
+
+	<!-- =================================================== agent cards -->
+	<section class="panel">
+		<div class="panel-head">
+			<span>Agents — designed failure mode vs observed behaviour</span>
+		</div>
+		<div class="rx-agents">
+			{% for a in agents %}
+			<div class="rx-agent">
+				<div class="rx-agent-name">{{ a.name }}</div>
+				<div class="rx-agent-role">
+					{{ a.snippet.trader_type }}{% if a.snippet.risk_tolerance %} · {{ a.snippet.risk_tolerance }} risk{% endif %}
+				</div>
+				<div class="rx-designed"><span>designed to fail by</span> {{ a.designed }}</div>
+				<table class="rx-kv">
+					<tr><td>decisions</td><td>{{ a.decisions }}</td></tr>
+					<tr><td>trades</td><td>{{ a.trades }}</td></tr>
+					<tr><td>holds</td><td>{{ a.holds }}</td></tr>
+					<tr><td>longest hold streak</td><td>{{ a.longest_hold_streak }}</td></tr>
+					<tr><td>hallucinations</td>
+						<td class="{% if a.hallucinations %}bad{% endif %}">{{ a.hallucinations }}</td></tr>
+					<tr><td>parser fallbacks</td><td>{{ a.stats.fallback_decisions|default:0 }}</td></tr>
+				</table>
+				{% if a.kinds %}
+				<div class="rx-tags">
+					{% for k, v in a.kinds.items %}<span class="rx-tag bad">{{ k }} ×{{ v }}</span>{% endfor %}
+				</div>
+				{% endif %}
+				{% if a.error_reasons %}
+				<div class="rx-tags">
+					{% for k, v in a.error_reasons.items %}<span class="rx-tag">{{ k }} ×{{ v }}</span>{% endfor %}
+				</div>
+				{% endif %}
+			</div>
+			{% endfor %}
+		</div>
+	</section>
+
+	<!-- ================================================ metric caveats -->
+	<section class="panel">
+		<div class="panel-head">
+			<span>What these numbers are not</span>
+			<div class="spacer"></div>
+			<span class="chip">read before quoting anything</span>
+		</div>
+		<div class="panel-body rx-caveats">
+			<div class="rx-caveat">
+				<b>Hallucination rate</b>
+				Denominator is <code>trade_attempts</code> — anything the model requested
+				that was not <code>hold</code>/<code>analyze</code>. It counts <i>requests</i>,
+				including clamped orders that still executed. An allowlist of
+				<code>buy</code>/<code>sell</code> undercounted and once produced a rate above 100%.
+			</div>
+			<div class="rx-caveat">
+				<b>Stale context</b>
+				Replaced outright in <code>4c6897e</code>. Requires a superseded headline,
+				the symbol named, and ≥2 distinctive tokens. The previous version scaled
+				with reasoning length, so it measured verbosity.
+				<span class="rx-flag">Figures here are not comparable to runs 02–05.</span>
+			</div>
+			<div class="rx-caveat">
+				<b>Persona consistency</b>
+				Returns ~1.00 on about 99.8% of decisions. It has essentially no
+				discriminative power and is shown for completeness only.
+				<span class="rx-flag">Do not read a result into this.</span>
+			</div>
+			<div class="rx-caveat">
+				<b>Episodes, raw vs distinct</b>
+				Reported both ways on purpose. A large gap means an agent reissued the
+				same rejected request every step — a livelock, not many independent errors.
+			</div>
+			<div class="rx-caveat">
+				<b>Cross-run comparison</b>
+				Never compare a paired-harness result with an independent-arm result:
+				different populations, different denominators. Across seeds, report
+				median and range — a single seed supports no rate claim.
+			</div>
+			<div class="rx-caveat">
+				<b><code>hold</code> is legal by construction</b>
+				An arm can improve its hallucination rate simply by trading less. Always
+				read the rate next to trade attempts.
+			</div>
+		</div>
+	</section>
+
+	<footer class="rx-foot">
+		<code>python -u trading_reverie.py --fork base_trading --sim {{ sim_code }} --steps {{ report.simulation_steps|default:last_step }}{% if seed is not None %} --seed {{ seed }}{% endif %} --fresh{% if middleware_enabled is False %} --no-middleware{% endif %}</code>
+	</footer>
+</div>
+
+<script>
+	const EVENTS = {{ events_json|safe }};
+	const DECISIONS = {{ decisions_json|safe }};
+	const SIM = "{{ sim_code }}";
+
+	let filter_kind = "all";
+	let filter_agent = "";
+
+	const el = (id) => document.getElementById(id);
+	const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
+		c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+	function money(v) {
+		// Pinned to en-US: the browser locale would otherwise decide the digit
+		// grouping, and a US-market sim rendering lakhs is simply wrong.
+		return v == null ? "—" : "$" + Number(v).toLocaleString("en-US", {maximumFractionDigits: 0});
+	}
+
+	function visible() {
+		return EVENTS.filter(e =>
+			(filter_kind === "all" || e.kind === filter_kind) &&
+			(!filter_agent || (e.agent || "").indexOf(filter_agent) !== -1));
+	}
+
+	function render_events() {
+		const rows = visible();
+		el("ev_count").textContent = rows.length + " event" + (rows.length === 1 ? "" : "s");
+		if (!rows.length) {
+			el("ev_list").innerHTML =
+				'<div class="detail-empty">No events of this kind in this run. ' +
+				'That is a result, not an error — an empty filter means it never happened.</div>';
+			return;
+		}
+		el("ev_list").innerHTML = rows.map((e, i) =>
+			'<div class="rx-ev sev-' + esc(e.severity) + '" data-i="' + EVENTS.indexOf(e) + '">' +
+				'<div class="rx-ev-step">' + esc(e.step) + '</div>' +
+				'<div class="rx-ev-main">' +
+					'<div class="rx-ev-title">' + esc(e.title) + '</div>' +
+					'<div class="rx-ev-detail">' + esc(e.detail) + '</div>' +
+				'</div>' +
+				'<a class="rx-ev-map" href="/map/' + SIM + '/' + e.step + '/" ' +
+					'title="Open the map at this step">map ↗</a>' +
+			'</div>').join("");
+
+		for (const node of document.querySelectorAll(".rx-ev")) {
+			node.onclick = function (evt) {
+				if (evt.target.classList.contains("rx-ev-map")) return;  // let the link work
+				const e = EVENTS[parseInt(this.dataset.i, 10)];
+				for (const n of document.querySelectorAll(".rx-ev")) n.classList.remove("sel");
+				this.classList.add("sel");
+				inspect(e.step, e.agent);
+			};
+		}
+	}
+
+	function inspect(step, agent) {
+		// An event may name two agents (a meeting) or none (a market shock), so
+		// fall back to showing every decision on that step.
+		let recs = DECISIONS.filter(d => d.step === step &&
+			(!agent || agent.indexOf(d.agent) !== -1));
+		if (!recs.length) recs = DECISIONS.filter(d => d.step === step);
+		el("insp_step").textContent = "step " + step;
+
+		if (!recs.length) {
+			el("insp_body").innerHTML = '<div class="detail-empty">No decision recorded at this step.</div>';
+			return;
+		}
+
+		el("insp_body").innerHTML = recs.map(d => {
+			const req = d.requested || {};
+			const req_txt = ((req.action || "—") + " " + sym(req.symbol) +
+				(req.quantity != null ? " ×" + req.quantity : "")).replace(/\s+/g, " ").trim();
+			const fin_txt = (d.action + " " + sym(d.symbol) +
+				(d.quantity != null ? " ×" + d.quantity : "")).replace(/\s+/g, " ").trim();
+			const diverged = d.hallucination ||
+				(req.action && req.action.toLowerCase() !== d.action);
+
+			return '<div class="rx-insp">' +
+				'<div class="rx-insp-head">' + esc(d.agent) +
+					(d.hallucination ? ' <span class="rx-tag bad">' +
+						esc(d.halluc_kind || "illegal_request") + '</span>' : "") +
+				'</div>' +
+
+				'<div class="rx-diff' + (diverged ? " diverged" : "") + '">' +
+					'<div><span>requested</span><b>' + esc(req_txt) + '</b></div>' +
+					'<div class="rx-arrow">→</div>' +
+					'<div><span>executed</span><b>' + esc(fin_txt) + '</b></div>' +
+				'</div>' +
+				(diverged ? '<div class="rx-diff-note">The middleware changed this decision.</div>' : "") +
+
+				(d.error_reason ? '<div class="rx-reason">' + esc(d.error_reason) + '</div>' : "") +
+
+				'<div class="rx-insp-lab">reasoning</div>' +
+				'<div class="rx-reasoning">' +
+					(d.reasoning ? esc(d.reasoning) :
+						'<i>empty — a parser fallback. No detector can score this decision.</i>') +
+				'</div>' +
+
+				'<div class="rx-insp-lab">book at this step</div>' +
+				'<table class="rx-kv">' +
+					'<tr><td>cash</td><td>' + money(d.cash) + '</td></tr>' +
+					'<tr><td>portfolio</td><td>' + money(d.portfolio_value) + '</td></tr>' +
+					'<tr><td>positions</td><td>' + esc(positions_str(d.positions)) + '</td></tr>' +
+					'<tr><td>filter status</td><td>' + esc(d.filter_status || "—") + '</td></tr>' +
+					(d.disposition ? '<tr><td>disposition</td><td>' + esc(d.disposition) + '</td></tr>' : "") +
+					(d.stale_context ? '<tr><td>stale context</td><td class="bad">yes</td></tr>' : "") +
+					(d.state_contradiction ? '<tr><td>state contradiction</td><td class="bad">yes</td></tr>' : "") +
+				'</table>' +
+
+				'<a class="btn" href="/map/' + SIM + '/' + d.step + '/">▶ See this on the map</a>' +
+			'</div>';
+		}).join("");
+	}
+
+	// phi3 and friends emit the *string* "null"/"none" for an absent symbol, so
+	// it reaches the log as text rather than JSON null (see action_filtering.py).
+	// Rendering "hold null x0" makes a normal HOLD look malformed.
+	function sym(s) {
+		if (s == null) return "";
+		const t = String(s).trim();
+		return (t === "" || t.toLowerCase() === "null" || t.toLowerCase() === "none") ? "" : t;
+	}
+
+	function positions_str(p) {
+		const parts = [];
+		for (const s in (p || {})) parts.push(s + "×" + (p[s].qty != null ? p[s].qty : p[s]));
+		return parts.length ? parts.join("  ") : "flat";
+	}
+
+	document.addEventListener("DOMContentLoaded", function () {
+		for (const b of document.querySelectorAll(".rx-fbtn")) {
+			b.onclick = function () {
+				for (const o of document.querySelectorAll(".rx-fbtn")) o.classList.remove("active");
+				this.classList.add("active");
+				filter_kind = this.dataset.kind;
+				render_events();
+			};
+		}
+		el("ev_agent").onchange = function () { filter_agent = this.value; render_events(); };
+		render_events();
+
+		// Open on the first hallucination if there is one -- it is the thing the
+		// page exists to show. Otherwise the first event.
+		const first = EVENTS.find(e => e.kind === "hallucination") || EVENTS[0];
+		if (first) inspect(first.step, first.agent);
+	});
+</script>
+</body>
+</html>

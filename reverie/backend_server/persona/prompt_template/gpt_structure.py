@@ -4,6 +4,7 @@ Author: Joon Sung Park (joonspk@stanford.edu)
 File: gpt_structure.py
 Description: Wrapper functions for calling OpenAI APIs.
 """
+import os
 import json
 import random
 import time
@@ -20,8 +21,8 @@ from utils import *
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_GENERATE_URL = OLLAMA_BASE_URL + "/api/generate"
 # Models to use
-OLLAMA_CHAT_MODEL = "mistral"
-OLLAMA_EMBED_MODEL = "nomic-embed-text"
+OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", "mistral")
+OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 def temp_sleep(seconds=0.1):
   time.sleep(seconds)

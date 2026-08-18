@@ -7,8 +7,9 @@ still open. Written for the trading-sim work on branch `armaans-frontend`.
 The run-05 fixes are committed (`264db38`, `4c6897e`). **Run 06 — the first
 multi-seed sweep — has landed and been analysed (§23).** It produced one claim
 that survives and three defects that invalidate most of the rest; the fixes for
-all three are in the working tree and **run 07 is the re-run**. The frontend was
-rebuilt in `010960f`.
+all three are committed (`f2ea081`) and **run 07 is the re-run, now executing on
+the DGX**. The seed fix is confirmed working on real hardware (§24.4). The
+frontend was rebuilt in `010960f`.
 
 **If you are catching up, read section 23 first** — it carries the run-06
 results and the current next actions. It supersedes §22. Sections 19–21 explain
@@ -1602,13 +1603,31 @@ a correction to it.
 
 - 141 tests pass (127 existing + 14 new).
 - `bash -n run_sweep.sh` clean; all three patched Python files compile.
-- **Still untested: the LLM path.** Ollama is not reachable from the dev
-  machine, so no end-to-end run has exercised the new sampling settings. The
-  seed/temperature plumbing is verified by mocking `requests.post` and asserting
-  the payload, which proves the value is *sent* — it does not prove Ollama
-  honours it, or that 0.7 is the right value. **First thing to check on the DGX
-  is that two seeds now produce different agent behaviour.** If they don't, the
-  fix didn't land and the sweep is again worthless.
+- **The LLM path is verified on the DGX** (2026-08-18). Two 20-step runs at
+  `--temperature 0.7`, seeds 42 and 43, `diff`ed on their decision lines. The
+  diff is non-empty and carries real behavioural divergence rather than
+  reordering:
+
+  ```
+  Marcus Webb   buy NVDA x22   vs   hold None x0
+  Marcus Webb   buy NVDA x22   vs   buy NVDA x16
+  Sara Kim      buy AAPL x46   vs   buy AAPL x19
+  Alex Chen     sell NVDA x50  vs   (absent)
+  ```
+
+  Different actions, symbols and sizes. Ollama honours the `seed` option and
+  the seed now reaches agent behaviour — which the mocked payload test could
+  not establish, only that the value was sent.
+
+  Also visible at 20 steps: **Alex Chen trades again.** He was a
+  non-participant in three of four run-06 seeds (200 holds, 0 requests). Read
+  this as encouraging, not as a result — 20 steps is not 200, and the new
+  abstention line (§24.3) is what should judge it.
+
+- **Still open at the time of writing: whether the divergence survives 200
+  steps.** The smoke test proves the seed reaches the sampler; it does not
+  prove the arms stay apart once compression settles and the prompts converge.
+  That is the first thing §25 item 2 checks in the run-07 reports.
 
 ---
 
@@ -1616,9 +1635,10 @@ a correction to it.
 
 Supersedes §22.
 
-### 1. Smoke-test the seed fix before spending 10 GPU-hours
+### ~~1. Smoke-test the seed fix~~ — DONE, PASSED (2026-08-18)
 
-Two short runs, different seeds, same everything else:
+Kept for the record, and because it is the right gate before any future
+sampling change. Two short runs, different seeds, same everything else:
 
 ```bash
 cd /workspace/Generative_agents/reverie/backend_server
@@ -1631,11 +1651,15 @@ diff <(grep "decision:" /workspace/seedcheck_a.log) \
      <(grep "decision:" /workspace/seedcheck_b.log)
 ```
 
-**A non-empty diff is the pass condition.** An empty diff means the seed still
-is not reaching agent behaviour and everything below is a waste of GPU time.
-This costs ~5 minutes and protects the whole sweep.
+**A non-empty diff is the pass condition.** An empty diff means the seed is not
+reaching agent behaviour and everything below is a waste of GPU time. ~5
+minutes, and it protects the whole sweep.
 
-### 2. Run 07 — the re-sweep
+**Result: non-empty, with genuine behavioural divergence** — evidence in §24.4.
+Run this gate again after any change to temperature, model, or the decision
+prompt.
+
+### 2. Run 07 — the re-sweep  ← CURRENT
 
 `run_sweep.sh` is already updated (`OUT=/workspace/run07`, `TEMPERATURE=0.7`,
 `run07_*` sim names). Same 4 seeds × 4 configs × 200 steps, 10 h cap, `.done`

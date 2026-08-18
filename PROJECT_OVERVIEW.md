@@ -445,13 +445,16 @@ Then `http://localhost:8000/`. Full description in **§9**.
   middleware arm replayed one trajectory across all four seeds — four seeds
   bought n≈1. Two further defects: `paired_eval.py` never updated the ID-RAG
   graph (so it ran different middleware from the runner, diverging at step 1),
-  and the report let an abstaining arm look clean. All three are fixed in the
-  working tree (CHANGES §24).
+  and the report let an abstaining arm look clean. All three are fixed and
+  committed (`f2ea081`, CHANGES §24). The seed fix is confirmed on the DGX:
+  seeds 42 and 43 now produce different actions, symbols and sizes (§24.4).
 - Test suite: **141 passing** (`tests/test_run06_defects.py` is new).
-- **Run 07 is the re-sweep.** `run_sweep.sh` is already pointed at it.
+- **Run 07 — the re-sweep — is executing on the DGX.** `run_sweep.sh` is
+  pointed at it (`OUT=/workspace/run07`, `TEMPERATURE=0.7`).
 
-**Next actions are in [CHANGES.md §25](CHANGES.md).** Item 1 is a 5-minute
-smoke test that must pass before the sweep is worth launching.
+**Next actions are in [CHANGES.md §25](CHANGES.md).** The seed smoke test (item
+1) has passed; item 2 is reading run 07 when it lands, and the first thing to
+check there is whether seed variance survives 200 steps.
 
 ---
 

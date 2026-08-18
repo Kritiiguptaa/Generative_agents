@@ -192,6 +192,30 @@ a:hover { text-decoration: underline; }
 .btn:hover  { border-color: var(--accent); color: #fff; }
 .btn:active { transform: translateY(1px); }
 .btn.primary { border-color: var(--accent); color: var(--accent); min-width: 74px; }
+.btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+/* Keep the end-stop buttons from lighting up as if they still did something. */
+.btn:disabled:hover { border-color: var(--line); color: var(--text); }
+
+/* Zoom stepper in the map panel header. The readout between the buttons is a
+   live value, not the static label it replaced. */
+.zoom-controls {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-right: 10px;
+}
+.zoom-controls .zoom-btn {
+	padding: 2px 8px;
+	font-size: 14px;
+	min-width: 26px;
+}
+.zoom-controls .chip {
+	min-width: 42px;
+	text-align: center;
+}
 
 .step-readout {
 	font-family: var(--mono);

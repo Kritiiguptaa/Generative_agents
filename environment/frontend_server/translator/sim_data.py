@@ -34,13 +34,19 @@ ACTION_ICONS = {
 # desks on rows y=6/7 with computers above on y=5) -- one per trading agent.
 # ---------------------------------------------------------------------------
 
-# Where agents sit. Row y=8 is the aisle immediately below each desk cluster;
-# x=18/23/28 are blocked there (chairs), so each agent stands on the walkable
-# tile at the left edge of their own cluster.
+# Where agents sit -- the chair itself (gid 941 on y=8), with the desk directly
+# above on y=6/7 and the monitor on y=5.
+#
+# These tiles are SOLID in the Collisions layer, which is correct: you cannot
+# walk through an occupied chair. The frontend's pathfinder special-cases a
+# blocked destination so an agent can take one final step into their own seat
+# (see find_path in main_script.html). Earlier these were x=17/22/27 -- the
+# walkable aisle tile beside the cluster -- which rendered every agent standing
+# a tile clear of their desk, as if permanently about to sit down.
 DESK_TILES = {
-    "Alex Chen": [17, 8],
-    "Marcus Webb": [22, 8],
-    "Sara Kim": [27, 8],
+    "Alex Chen": [18, 8],
+    "Marcus Webb": [23, 8],
+    "Sara Kim": [28, 8],
 }
 
 # The two presentation screens (game object 32147) span x:20-21 and x:24-25 on
@@ -55,9 +61,50 @@ MARKET_BOARD_TILE = [22, 4]
 MARKET_BOARD_SPAN = (16, 42)
 
 # Fully-walkable aisle running the width of the bullpen (collision_maze.csv
-# shows y=9 clear for 38 tiles from x=5). When trading_interactions.py fires a
-# real peer interaction the two agents involved walk out here to meet.
+# shows y=9 clear for 38 tiles from x=5). Fallback meeting spot, used only when
+# an agent has no known desk position.
 MEETING_ROW = 9
+
+# The lounge on the lower floor. Row 16 walls the bullpen off from everything
+# below it, with doorways at x=7-8 and x=32-33; the pathfinder routes through
+# them, so this is reachable from all three desks (BFS-verified: 23 tiles from
+# Alex's desk, 28 from Marcus's, 33 from Sara's). Agents meet here rather than
+# in the aisle one tile below their own desks, which read as "barely moved".
+MEETING_ROOM_TILE = [7, 21]
+
+# trading_interactions.maybe_interaction() records a meeting on a single step,
+# but a conversation that appears and vanishes inside one 1600 ms replay tick is
+# unreadable -- and the walk down is ~33 tiles, longer than one tick. So the
+# meeting is held on screen for this many steps.
+#
+# The later steps are *visual* only: the interaction itself really did happen on
+# one step. To keep the map from contradicting the decision log, an agent is
+# only held in the lounge on a follow-on step if their actual logged decision
+# there was a no-op. Anyone who traded leaves for the market board as normal.
+MEETING_HOLD_STEPS = 3
+
+# Break area: the bank of vending machines in the lower-right room. The office
+# map already draws real appliances across x=26..32 on y=19 (solid in the
+# Collisions layer), and y=20 directly in front of them is clear -- so an agent
+# sent here stands AT a machine rather than on an anonymous patch of floor.
+# That matters because the previous spot was open floor and the only cue that
+# anything was happening was a 6px cup glyph over a 16px sprite.
+#
+# BREAK_STRIDE spaces the agents two tiles apart so each one lines up with its
+# own machine (26, 28, 30) instead of crowding a single one.
+BREAK_ROOM_TILE = [26, 20]
+BREAK_STRIDE = 2
+
+# An agent that holds this many steps running is sent to the break area instead
+# of sitting motionless at their desk.
+#
+# This is a *rendering* of a real property -- the length of an unbroken HOLD
+# streak, read straight off the decision log -- and not a simulated event: the
+# sim has no notion of a coffee break. It earns its place because over-caution
+# is Alex Chen's designed failure mode and is otherwise completely invisible on
+# the map, where "holding for 30 steps" and "holding once" look identical. The
+# moment the agent trades, the streak resets and they go back to work.
+HOLD_STREAK_FOR_BREAK = 6
 
 
 def _sim_path(sim_code, *parts):
@@ -93,13 +140,21 @@ def load_desk_positions(sim_code, persona_names):
         return positions
     latest = _load_json(os.path.join(env_dir, f"{steps[-1]}.json"), {})
     for name in persona_names:
-        if name in latest:
-            positions[name] = [latest[name]["x"], latest[name]["y"]]
-        elif name in DESK_TILES:
-            # Sims forked before the office map landed have no entry (or a
-            # stale one) for this agent -- fall back to the documented office
-            # desk rather than dumping them at [0,0] inside a wall.
+        if name in DESK_TILES:
+            # DESK_TILES wins over environment/*.json for agents we know.
+            #
+            # That file is vestigial: it is written once at fork time and the
+            # trading loop never updates it, and base_trading ships the aisle
+            # tiles beside each cluster (17/22/27 on y=8) from before the office
+            # map existed. Honouring it renders every agent standing a tile
+            # clear of their own desk. DESK_TILES holds the chairs, which is
+            # this map's actual answer to "where does this agent sit".
             positions[name] = list(DESK_TILES[name])
+        elif name in latest:
+            # Anyone we have no desk for -- a renamed persona, or an inherited
+            # village sim -- still gets their recorded position rather than
+            # being dumped at [0,0] inside a wall.
+            positions[name] = [latest[name]["x"], latest[name]["y"]]
     return positions
 
 
@@ -170,17 +225,53 @@ def load_interactions(sim_code):
 
 def _meeting_tiles(agent_a, agent_b, desk_positions, map_width=44):
     """
-    Where two interacting agents stand to talk. Derived from their real desk
-    positions -- the midpoint between the two desks, pushed out to the open
-    MEETING_ROW aisle -- then offset by one tile so they stand side by side
-    facing each other instead of overlapping on one tile.
+    Where two interacting agents stand to talk: the lounge on the lower floor,
+    offset by one tile so they stand side by side rather than overlapping.
+
+    Falls back to the bullpen aisle only if we have no desk position for either
+    agent, which means the sim predates the office map and its tiles cannot be
+    trusted to be walkable.
     """
+    if agent_a in desk_positions or agent_b in desk_positions:
+        mx, my = MEETING_ROOM_TILE
+        mx = max(0, min(mx, map_width - 2))
+        return [mx, my], [mx + 1, my]
+
     ax = desk_positions.get(agent_a, [0, 0])[0]
     bx = desk_positions.get(agent_b, [0, 0])[0]
     mid_x = (ax + bx) // 2
     # Keep the pair inside the map even if the midpoint lands on the last column.
     mid_x = max(0, min(mid_x, map_width - 2))
     return [mid_x, MEETING_ROW], [mid_x + 1, MEETING_ROW]
+
+
+def _apply_hold_streaks(movement, persona_names, map_width=44):
+    """
+    Walk each agent's decisions in step order and, once they have held
+    HOLD_STREAK_FOR_BREAK steps without trading, move them to the break area
+    for the remainder of that streak.
+
+    Only the movement tile and the emoji change -- the decision, its reasoning
+    and every metric attached to it are left exactly as logged, so the agent
+    cards and decision log still report the HOLD that actually happened.
+    """
+    bx, by = BREAK_ROOM_TILE
+    for offset, agent in enumerate(sorted(persona_names)):
+        streak = 0
+        for step in sorted(movement.keys()):
+            rec = movement[step].get(agent)
+            if rec is None:
+                continue
+            if rec.get("action") in ("buy", "sell"):
+                streak = 0
+                continue
+            streak += 1
+            if streak >= HOLD_STREAK_FOR_BREAK:
+                # One machine each, rather than three people on one tile.
+                rec["movement"] = [min(bx + offset * BREAK_STRIDE, map_width - 1), by]
+                rec["pronunciatio"] = "☕"        # hot beverage
+                rec["on_break"] = True
+                rec["hold_streak"] = streak
 
 
 def load_run_status(sim_code):
@@ -197,6 +288,161 @@ def load_run_status(sim_code):
         "current_step": meta.get("step", 0),
         "is_running": bool(meta.get("sim_running", False)),
     }
+
+
+# A single-step price move at or above this is a scripted news shock rather
+# than ordinary drift (ticks in these runs are around a quarter of a percent).
+# The headline TEXT is not recoverable -- trading_log.json stores market_prices
+# and never the event -- so the timeline reports the move, not the story.
+SHOCK_PCT = 2.0
+
+
+def build_events(sim_code):
+    """
+    Flatten a run into one step-ordered timeline of things worth looking at.
+
+    Every entry carries the step it happened on so the page can deep-link into
+    /map/<sim>/<step>/. Nothing here is inferred beyond what the log records:
+    a "shock" is a measured price move, a "hallucination" is the log's own
+    flag, a "break" is a counted HOLD streak.
+    """
+    log = load_trading_log(sim_code)
+    events = []
+
+    # --- market shocks: derived from the prices each entry carries ----------
+    prices_by_step = {}
+    for entry in log:
+        prices_by_step.setdefault(entry["step"], entry.get("market_prices") or {})
+    steps_sorted = sorted(prices_by_step)
+    for i, step in enumerate(steps_sorted):
+        if i == 0:
+            continue
+        prev = prices_by_step[steps_sorted[i - 1]]
+        for sym, px in prices_by_step[step].items():
+            was = prev.get(sym)
+            if not was:
+                continue
+            pct = (px - was) / was * 100
+            if abs(pct) >= SHOCK_PCT:
+                events.append({
+                    "step": step, "kind": "shock", "agent": "",
+                    "title": "%s %s%.1f%%" % (sym, "+" if pct > 0 else "", pct),
+                    "detail": "Scripted news shock. Previous %.2f, now %.2f."
+                              % (was, px),
+                    "severity": "up" if pct > 0 else "down",
+                })
+
+    # --- per-decision events ------------------------------------------------
+    streaks = {}
+    for entry in log:
+        step, agent = entry["step"], entry["agent"]
+        decision = entry.get("decision") or {}
+        action = (decision.get("action") or "hold").lower()
+        requested = entry.get("requested") or {}
+
+        if entry.get("hallucination"):
+            # The most important row on the page: what the model asked for,
+            # next to what it was allowed to do.
+            req_txt = "%s %s x%s" % (requested.get("action", "?"),
+                                     requested.get("symbol", "-"),
+                                     requested.get("quantity", "?"))
+            events.append({
+                "step": step, "kind": "hallucination", "agent": agent,
+                "title": "%s -- %s" % (agent, entry.get("halluc_kind") or "illegal_request"),
+                "detail": "Requested %s. %s. Filter: %s." % (
+                    req_txt,
+                    entry.get("error_reason") or "not permitted",
+                    entry.get("halluc_disposition") or entry.get("filter_status") or "-"),
+                "severity": "bad",
+            })
+        elif action in ("buy", "sell"):
+            events.append({
+                "step": step, "kind": "trade", "agent": agent,
+                "title": "%s %s %s x%s" % (agent, action.upper(),
+                                           decision.get("symbol") or "-",
+                                           decision.get("quantity")),
+                "detail": entry.get("outcome") or "",
+                "severity": "up" if action == "buy" else "down",
+            })
+
+        if not entry.get("has_reasoning", True):
+            events.append({
+                "step": step, "kind": "fallback", "agent": agent,
+                "title": "%s -- parser fallback" % agent,
+                "detail": "Empty reasoning; no detector can score this decision.",
+                "severity": "warn",
+            })
+        if entry.get("state_contradiction"):
+            events.append({
+                "step": step, "kind": "contradiction", "agent": agent,
+                "title": "%s -- state contradiction" % agent,
+                "detail": str(entry.get("state_contradiction")),
+                "severity": "warn",
+            })
+        if entry.get("stale_context"):
+            events.append({
+                "step": step, "kind": "stale", "agent": agent,
+                "title": "%s -- stale context" % agent,
+                "detail": str(entry.get("stale_context")),
+                "severity": "warn",
+            })
+
+        # Hold streaks, counted the same way the map counts them.
+        if action in ("buy", "sell"):
+            streaks[agent] = 0
+        else:
+            streaks[agent] = streaks.get(agent, 0) + 1
+            if streaks[agent] == HOLD_STREAK_FOR_BREAK:
+                events.append({
+                    "step": step, "kind": "idle", "agent": agent,
+                    "title": "%s -- %d steps without trading" % (agent, streaks[agent]),
+                    "detail": "Sent to the break area on the map.",
+                    "severity": "dim",
+                })
+
+    for entry in load_interactions(sim_code):
+        agents = entry.get("agents") or []
+        events.append({
+            "step": entry.get("step"), "kind": "interaction",
+            "agent": ", ".join(agents),
+            "title": "Peer interaction: %s" % " and ".join(agents),
+            "detail": entry.get("summary") or "",
+            "severity": "info",
+        })
+
+    events.sort(key=lambda e: (e["step"] if e["step"] is not None else 0,
+                               e["kind"], e["agent"]))
+    return events
+
+
+def build_decisions(sim_code):
+    """Every decision, trimmed to what the inspector panel shows."""
+    out = []
+    for entry in load_trading_log(sim_code):
+        decision = entry.get("decision") or {}
+        out.append({
+            "step": entry["step"],
+            "agent": entry["agent"],
+            "action": (decision.get("action") or "hold").lower(),
+            "symbol": decision.get("symbol"),
+            "quantity": decision.get("quantity"),
+            "reasoning": decision.get("reasoning") or "",
+            "requested": entry.get("requested") or {},
+            "hallucination": bool(entry.get("hallucination")),
+            "halluc_kind": entry.get("halluc_kind") or "",
+            "disposition": entry.get("halluc_disposition") or "",
+            "filter_status": entry.get("filter_status") or "",
+            "error_reason": entry.get("error_reason") or "",
+            "cash": entry.get("cash"),
+            "portfolio_value": entry.get("portfolio_value"),
+            "positions": entry.get("positions") or {},
+            "stale_context": entry.get("stale_context"),
+            "state_contradiction": entry.get("state_contradiction"),
+            "drift": entry.get("persona_drift_score"),
+            "compression": entry.get("compression") or {},
+            "outcome": entry.get("outcome") or "",
+        })
+    return out
 
 
 def _action_description(decision):
@@ -262,6 +508,13 @@ def build_replay(sim_code):
         step_bucket = movement.setdefault(step, {})
         step_bucket[agent] = {
             "movement": tile,
+            # Normalised verb, kept so later passes (the meeting hold) can ask
+            # "did this agent actually trade?" without re-parsing the log entry.
+            "action": action,
+            # Seated at their own desk, so the frontend can turn them to face
+            # the monitor instead of leaving them facing whichever way they
+            # happened to walk in from.
+            "at_desk": tile == at_desk,
             "pronunciatio": ACTION_ICONS.get(
                 (decision.get("action") or "hold").lower(), "✋"
             ),
@@ -296,6 +549,11 @@ def build_replay(sim_code):
         for offset, name in enumerate(at_board):
             step_bucket[name]["movement"] = [start_x + offset, MARKET_BOARD_TILE[1]]
 
+    # Send agents on a long unbroken HOLD streak to the break area. Done before
+    # the interaction overlay so that a real meeting still wins: an agent who is
+    # both idle and in a conversation should be shown in the conversation.
+    _apply_hold_streaks(movement, persona_names)
+
     # Overlay real peer interactions on top of the decision-driven movement.
     # maybe_interaction() runs before the agents' decisions within a step, so
     # for that step the meeting is what the two of them are actually doing --
@@ -311,16 +569,30 @@ def build_replay(sim_code):
         interactions_by_step[step] = entry
 
         tiles = _meeting_tiles(agents[0], agents[1], desk_positions)
-        step_bucket = movement.setdefault(step, {})
-        for agent, tile in zip(agents, tiles):
-            rec = step_bucket.get(agent)
-            if rec is None:
-                continue
-            rec["movement"] = tile
-            rec["chat"] = entry.get("summary", "")
-            rec["chat_topic"] = entry.get("topic", "")
-            rec["chat_with"] = agents[1] if agent == agents[0] else agents[0]
-            rec["pronunciatio"] = "\U0001F4AC"  # speech balloon
+
+        # Hold the meeting on screen for MEETING_HOLD_STEPS. The first of those
+        # is the step the interaction actually happened on, where it takes
+        # precedence over the decision outright (maybe_interaction() runs before
+        # the agents decide). The rest are presentation only, so a real trade
+        # on those steps wins and the agent walks off to the board instead.
+        for offset in range(MEETING_HOLD_STEPS):
+            held_step = step + offset
+            step_bucket = movement.get(held_step)
+            if step_bucket is None:
+                break                       # run ended mid-meeting
+
+            for agent, tile in zip(agents, tiles):
+                rec = step_bucket.get(agent)
+                if rec is None:
+                    continue
+                if offset > 0 and rec.get("action") in ("buy", "sell"):
+                    continue                # they traded; don't fake a chat
+                rec["movement"] = tile
+                rec["chat"] = entry.get("summary", "")
+                rec["chat_topic"] = entry.get("topic", "")
+                rec["chat_with"] = agents[1] if agent == agents[0] else agents[0]
+                rec["pronunciatio"] = "\U0001F4AC"  # speech balloon
+                rec["in_meeting"] = True
 
     steps = sorted(movement.keys())
     run_status = load_run_status(sim_code)
