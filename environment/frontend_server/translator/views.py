@@ -467,12 +467,19 @@ def run_explorer(request, sim_code):
     "attempts": report.get("total_trade_attempts"),
     "rate": report.get("overall_hallucination_rate_pct"),
     "derived": False,
+    "disposition_unknown": False,
   }
   if not has_report_counts(report):
     caught = sum(1 for d in decisions
                  if d["hallucination"] and d["disposition"] != "executed_malformed")
     executed = sum(1 for d in decisions if d["disposition"] == "executed_malformed")
     attempts = sum(1 for d in decisions if _is_trade_attempt(d))
+    # Logs written before the disposition field existed carry "" on every
+    # record. Deriving from that yields "all caught, none executed", which is
+    # not a cautious reading -- it is a fabricated one, and it is the single
+    # claim this page exists to make. Say unknown instead.
+    unknown = any(d["hallucination"] for d in decisions) and \
+        not any(d["disposition"] for d in decisions)
     headline = {
       "caught": caught,
       "executed": executed,
@@ -480,6 +487,7 @@ def run_explorer(request, sim_code):
       # 0/0 prints N/A, never 0.0% -- a vacuous result must not look measured.
       "rate": round((caught + executed) / attempts * 100, 1) if attempts else None,
       "derived": True,
+      "disposition_unknown": unknown,
     }
 
   # Whatever compression recorded, averaged over the decisions that carry it.

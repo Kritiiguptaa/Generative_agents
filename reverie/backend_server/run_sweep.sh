@@ -74,8 +74,21 @@ run () {   # run <name> <script> <args...>
     # -u: without it Python block-buffers into the file and a live tail shows
     # nothing for minutes, which reads as a hang.
     if python -u "$@" > "$OUT/$name.log" 2>&1; then
-        touch "$OUT/$name.done"
-        echo "[$(date +%T)] OK    $name  ($(( SECONDS - t0 ))s)"
+        # Exit 0 is not proof the log survived. Run 07 died mid-write when the
+        # NFS export returned ENOSPC while the client still saw 99GB free, and
+        # a write that fails during the final flush can truncate the report
+        # while Python exits clean. A .done on a truncated log makes the next
+        # resume SKIP a config that was never analysable. Both harnesses end
+        # their header with "REPORT", so requiring it means .done implies a
+        # readable report.
+        if grep -q "REPORT$" "$OUT/$name.log"; then
+            touch "$OUT/$name.done"
+            echo "[$(date +%T)] OK    $name  ($(( SECONDS - t0 ))s)"
+        else
+            echo "[$(date +%T)] TRUNCATED $name -- exit 0 but no report in the log."
+            echo "        Not marking done; a rerun will redo this config."
+            return 1
+        fi
     else
         echo "[$(date +%T)] FAIL  $name  ($(( SECONDS - t0 ))s) -- see $OUT/$name.log"
         tail -5 "$OUT/$name.log" | sed 's/^/        /'
