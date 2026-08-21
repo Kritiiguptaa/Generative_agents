@@ -596,6 +596,9 @@
 	// ###########################################################################
 
 	function el(id) { return document.getElementById(id); }
+	// trader_type is stored as a slug ("hedge_fund") and every place that
+	// shows it shows it as a label, so it is un-slugged once, here.
+	function trader_label(t) { return String(t || "").replace(/_/g, " "); }
 	function esc(s) {
 	  return String(s == null ? "" : s)
 	    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -835,7 +838,7 @@
 	  const bits = [];
 	  bits.push('<div class="detail-row"><div class="detail-label">Current action</div>' +
 	    '<div class="agent-action ' + action_kind(rec) + '" style="margin-top:0">' +
-	    esc(rec.description) + (rec.outcome ? ' <span style="color:var(--text-faint); font-size:13px;">— ' +
+	    esc(rec.description) + (rec.outcome ? ' <span style="color:var(--faint); font-size:13px;">— ' +
 	    esc(rec.outcome) + "</span>" : "") + "</div></div>");
 
 	  bits.push('<div class="detail-row"><div class="detail-label">Reasoning (verbatim from the model)</div>' +
@@ -855,7 +858,7 @@
 	  if (snip.trading_strategy || snip.innate) {
 	    bits.push('<div class="detail-row"><div class="detail-label">Persona</div>' +
 	      '<div class="detail-reasoning">' +
-	      esc([snip.trader_type, snip.risk_tolerance ? "risk: " + snip.risk_tolerance : ""]
+	      esc([trader_label(snip.trader_type), snip.risk_tolerance ? "risk: " + snip.risk_tolerance : ""]
 	          .filter(Boolean).join(" · ")) +
 	      (snip.trading_strategy ? "\n" + esc(snip.trading_strategy) : "") +
 	      (snip.innate ? "\n" + esc(snip.innate) : "") + "</div></div>");
@@ -916,7 +919,7 @@
 	  const body = el("log_body");
 	  body.innerHTML = rows.length
 	    ? rows.join("")
-	    : '<tr><td colspan="6" style="color:var(--text-faint); font-style:italic;">no decisions logged yet</td></tr>';
+	    : '<tr><td colspan="6" style="color:var(--faint); font-style:italic;">no decisions logged yet</td></tr>';
 
 	  for (const tr of body.querySelectorAll("tr[data-step]")) {
 	    tr.onclick = function () { pause_replay(); render_step(parseInt(this.dataset.step, 10)); };
@@ -1128,7 +1131,7 @@
 	    const role_el = el("role-" + key);
 	    const snip = persona_snippets[key];
 	    if (role_el && snip) {
-	      role_el.textContent = [snip.trader_type, snip.risk_tolerance ? snip.risk_tolerance + " risk" : ""]
+	      role_el.textContent = [trader_label(snip.trader_type), snip.risk_tolerance ? snip.risk_tolerance + " risk" : ""]
 	        .filter(Boolean).join(" · ");
 	    }
 	  }

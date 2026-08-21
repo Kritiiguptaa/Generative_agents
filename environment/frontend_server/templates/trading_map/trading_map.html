@@ -14,14 +14,23 @@
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>Agent Anchor — {{ sim_code }}</title>
-	<link rel="stylesheet" href="{% static 'css/trading_ui.css' %}">
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+	<!-- ?v= is a cache buster. The sheets are served by runserver with no
+	     fingerprint, and a browser holding the pre-redesign trading_ui.css --
+	     which declared its own dark :root -- renders this page half dark.
+	     Bump the token whenever a sheet changes. -->
+	<link rel="stylesheet" href="{% static 'css/anchor.css' %}?v=20260821b">
+	<link rel="stylesheet" href="{% static 'css/trading_ui.css' %}?v=20260821b">
 </head>
 <body>
 
 <div class="topbar">
-	<div class="brand">Agent<span>Anchor</span></div>
-	<div class="chip">{{ sim_code }}</div>
-	<div class="chip">3 agents · modern office</div>
+	<a class="brand" href="/"><span class="mark">A</span>AGENT&nbsp;<span>ANCHOR</span></a>
+	<span class="chip">{{ sim_code }}</span>
+	<span class="chip">3 agents · modern office</span>
+	<a class="chip" href="/run/{{ sim_code }}/">run explorer ↗</a>
 	<div class="spacer"></div>
 	<div class="clock" id="game-time-content">—</div>
 	<div id="live_badge"></div>
@@ -32,113 +41,138 @@
 	<div class="tick"><span class="sym">waiting for data</span></div>
 </div>
 
-<div class="wrap">
+<!--
+  Layout, in the order the page answers questions:
 
-	<!-- ============================================================ left -->
-	<div>
-		{% if not has_data %}
-		<div class="notice">
-			No completed decision steps yet for this sim — <code>reverie/trading_log.json</code>
-			hasn't been written. The run may still be starting. The office renders with no
-			activity until it exists; this page polls and fills in on its own.
-		</div>
-		{% endif %}
+    1. where are they      -> the floor, full width, in the ANCHOR-1 shell
+    2. what did they just do -> the agent row, directly under it
+    3. show me the detail  -> log on the left, inspector sticky on the right
 
-		<div class="panel">
-			<div class="panel-head">
-				<span>Trading Floor</span>
-				<div class="spacer"></div>
-				<div class="zoom-controls">
-					<button id="zoom_out_button" class="btn zoom-btn" title="Zoom out (−)">−</button>
-					<span class="chip" id="zoom_readout">2.0×</span>
-					<button id="zoom_in_button" class="btn zoom-btn" title="Zoom in (+)">+</button>
-				</div>
-				<span class="chip">44×32 · ← → scrub · space play</span>
-			</div>
+  The previous revision put the floor, the detail panel and the whole decision
+  log in one narrow column with the agents squeezed into a 320px rail. The
+  agents are the subject of this page, so they get the full width now, and the
+  log gets room to be read.
+-->
+<div class="floor-wrap">
 
-			<div id="game-container"></div>
+  <!-- ========================================================= 1. the floor -->
+  <div class="dex dex-map">
+    <span class="screw tl"></span><span class="screw tr"></span>
+    <span class="screw bl"></span><span class="screw br"></span>
 
-			<div class="transport">
-				<button id="prev_button" class="btn" title="Previous step">◀</button>
-				<button id="play_button" class="btn primary">▶ Play</button>
-				<button id="pause_button" class="btn" title="Pause">❚❚</button>
-				<button id="next_button" class="btn" title="Next step">▶</button>
-				<input type="range" id="step_slider" min="0" max="0" value="{{ step }}">
-				<div class="step-readout">
-					step <b id="step-content">{{ step }}</b> / <span id="max-step-content">0</span>
-				</div>
-			</div>
+    <div class="dex-top">
+      <span class="dex-lens"></span>
+      <span class="dex-led coral"></span>
+      <span class="dex-led lemon"></span>
+      <span class="dex-led mint"></span>
+      <span class="dex-title">TRADING FLOOR &middot; {{ sim_code|upper }}</span>
+      <span class="dex-enc">44&times;32</span>
+    </div>
 
-			<div id="interaction_banner"></div>
-		</div>
+    <div class="dex-screen">
+      <div id="game-container"></div>
+    </div>
 
-		<!-- selected-agent detail -->
-		<div class="panel" style="margin-top:18px;">
-			<div class="panel-head">
-				<span id="detail_title">Agent Detail</span>
-				<div class="spacer"></div>
-				<span id="detail_badge"></span>
-				<a href="#" id="detail_state_link" target="_blank" style="font-size:11px; display:none;">state details ↗</a>
-			</div>
-			<div class="panel-body" id="detail_body">
-				<div class="detail-empty">Select an agent to see their action, reasoning, and
-					what <code>action_filtering.py</code> did with it.</div>
-			</div>
-		</div>
+    <div class="dex-ctrl">
+      <span class="dpad" aria-hidden="true"></span>
+      <div class="zoom-controls">
+        <button id="zoom_out_button" class="st-btn glyph" title="Zoom out (&minus;)">&minus;</button>
+        <span class="dex-read" id="zoom_readout">2.0&times;</span>
+        <button id="zoom_in_button" class="st-btn glyph" title="Zoom in (+)">+</button>
+      </div>
+      <span class="dex-hint-inline">&larr; &rarr; SCRUB &middot; SPACE PLAY</span>
+      <span class="dex-spk" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    </div>
+  </div>
 
-		<!-- decision log -->
-		<div class="panel" style="margin-top:18px;">
-			<div class="panel-head">
-				<span>Decision Log</span>
-				<div class="spacer"></div>
-				<span class="chip" id="log_filter_label">all agents</span>
-				<button class="btn" id="log_clear_filter" style="font-size:11px; padding:3px 8px;">clear</button>
-			</div>
-			<div class="log-scroll">
-				<table class="log">
-					<thead>
-						<tr>
-							<th style="width:52px">Step</th>
-							<th style="width:110px">Agent</th>
-							<th style="width:120px">Action</th>
-							<th style="width:96px" class="num">Portfolio</th>
-							<th style="width:92px">Status</th>
-							<th>Reasoning</th>
-						</tr>
-					</thead>
-					<tbody id="log_body"></tbody>
-				</table>
-			</div>
-		</div>
-	</div>
+  <!-- transport, sitting directly under the console it drives -->
+  <div class="transport">
+    <button id="prev_button" class="btn" title="Previous step">&#9664;</button>
+    <button id="play_button" class="btn primary">&#9654; Play</button>
+    <button id="pause_button" class="btn" title="Pause">&#10074;&#10074;</button>
+    <button id="next_button" class="btn" title="Next step">&#9654;</button>
+    <input type="range" id="step_slider" min="0" max="0" value="{{ step }}">
+    <div class="step-readout">
+      step <b id="step-content">{{ step }}</b> / <span id="max-step-content">0</span>
+    </div>
+  </div>
 
-	<!-- =========================================================== right -->
-	<div class="agents" id="agent_cards">
-	{% for p in persona_names %}
-		<div class="agent-card" id="card-{{p.underscore}}" data-key="{{p.underscore}}">
-			<div class="agent-top">
-				{% with 'assets/characters/profile/'|add:p.underscore|add:'.png' as image_static %}
-				<img src="{% static image_static %}" alt="{{ p.original }}">
-				{% endwith %}
-				<div class="agent-id">
-					<div class="agent-name">{{ p.original }}</div>
-					<div class="agent-role" id="role-{{p.underscore}}"></div>
-				</div>
-				<div class="agent-emoji" id="quick_emoji-{{p.underscore}}"></div>
-			</div>
-			<div class="agent-action hold" id="card_action-{{p.underscore}}">—</div>
-			<div style="margin-top:6px;"><span id="card_badge-{{p.underscore}}"></span></div>
-			<div class="agent-figures">
-				<div>PV <b id="card_pv-{{p.underscore}}">—</b></div>
-				<div>cash <b id="card_cash-{{p.underscore}}">—</b></div>
-			</div>
-			<div class="agent-figures" style="margin-top:2px;">
-				<div>pos <b id="card_pos-{{p.underscore}}">—</b></div>
-			</div>
-		</div>
-	{% endfor %}
-	</div>
+  <div id="interaction_banner"></div>
 
+  {% if not has_data %}
+  <div class="notice">
+    No completed decision steps yet for this sim &mdash; <code>reverie/trading_log.json</code>
+    hasn't been written. The run may still be starting. The office renders with no
+    activity until it exists; this page polls and fills in on its own.
+  </div>
+  {% endif %}
+
+  <!-- ======================================================= 2. the agents -->
+  <div class="agents" id="agent_cards">
+  {% for p in persona_names %}
+    <div class="agent-card" id="card-{{p.underscore}}" data-key="{{p.underscore}}">
+      <div class="agent-top">
+        {% with 'assets/characters/profile/'|add:p.underscore|add:'.png' as image_static %}
+        <img src="{% static image_static %}" alt="{{ p.original }}">
+        {% endwith %}
+        <div class="agent-id">
+          <div class="agent-name">{{ p.original }}</div>
+          <div class="agent-role" id="role-{{p.underscore}}"></div>
+        </div>
+        <div class="agent-emoji" id="quick_emoji-{{p.underscore}}"></div>
+      </div>
+      <div class="agent-action hold" id="card_action-{{p.underscore}}">&mdash;</div>
+      <div class="agent-badge-row"><span id="card_badge-{{p.underscore}}"></span></div>
+      <div class="agent-figures">
+        <div><span>portfolio</span><b id="card_pv-{{p.underscore}}">&mdash;</b></div>
+        <div><span>cash</span><b id="card_cash-{{p.underscore}}">&mdash;</b></div>
+        <div><span>positions</span><b id="card_pos-{{p.underscore}}">&mdash;</b></div>
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+
+  <!-- ====================================================== 3. the evidence -->
+  <div class="floor-cols">
+
+    <div class="panel">
+      <div class="panel-head">
+        <span>Decision log</span>
+        <div class="spacer"></div>
+        <span class="chip" id="log_filter_label">all agents</span>
+        <button class="btn ghost sm" id="log_clear_filter">clear</button>
+      </div>
+      <div class="log-scroll">
+        <table class="log">
+          <thead>
+            <tr>
+              <th style="width:52px">Step</th>
+              <th style="width:110px">Agent</th>
+              <th style="width:120px">Action</th>
+              <th style="width:96px" class="num">Portfolio</th>
+              <th style="width:92px">Status</th>
+              <th>Reasoning</th>
+            </tr>
+          </thead>
+          <tbody id="log_body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel floor-sticky">
+      <div class="panel-head">
+        <span id="detail_title">Agent detail</span>
+        <div class="spacer"></div>
+        <span id="detail_badge"></span>
+        <a href="#" id="detail_state_link" target="_blank" class="mono" style="font-size:11px; display:none;">state &#8599;</a>
+      </div>
+      <div class="panel-body" id="detail_body">
+        <div class="detail-empty">Select an agent to see their action, reasoning, and
+          what <code>action_filtering.py</code> did with it.</div>
+      </div>
+    </div>
+
+  </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.js"></script>

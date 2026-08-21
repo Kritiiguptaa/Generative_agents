@@ -18,34 +18,49 @@
 /* --- 1. tokens ---------------------------------------------------------- */
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
-  --bg:        #0A0D14;
-  --bg-2:      #0D111A;
-  --surface:   #121722;
-  --surface-2: #182030;
+  /* The page ground is plain white, not the off-white the inspiration sheet
+     used. Panels sit on it as outlined white cards, so the separation comes
+     from --border rather than from a tint. --bg-2 is the only tinted band
+     left, and it is used sparingly. */
+  --bg:        #FFFFFF;
+  --bg-2:      #F7F9FB;
+  --surface:   #FFFFFF;
+  --surface-2: #F4F7FA;
 
-  --border:        #232B3A;
-  --border-strong: #303B52;
+  --border:        #E3E8F0;
+  --border-strong: #CDD6E3;
 
-  --ink:   #E9EDF5;
-  --muted: #A7B0C0;
-  --faint: #717A8C;
+  --ink:   #131722;
+  --muted: #4A5464;
+  --faint: #7D8798;
 
-  --accent:      #FFCA54;
-  --accent-2:    #FFD87A;
+  /* Two ambers on purpose. #E5A00D is sized for accent TEXT on a white page;
+     using it as a button fill reads brown. The fill starts where the text
+     accent's hover used to be. Do not collapse these. */
+  --accent:      #E5A00D;
+  --accent-2:    #FFC94F;
   --accent-ink:  #17150E;
-  --accent-soft: rgba(255, 202, 84, 0.10);
-  --accent-line: rgba(255, 202, 84, 0.38);
-  --accent-fill:       #FFD165;
-  --accent-fill-hover: #FFE08F;
+  --accent-soft: rgba(229, 160, 13, 0.12);
+  --accent-line: rgba(212, 148, 16, 0.45);
+  --accent-fill:       #FFC94F;
+  --accent-fill-hover: #FFDC8A;
 
-  --green: #4ADE80;
-  --red:   #FF6B6B;
-  --teal:  #4ECDC4;
+  --green: #16A34A;
+  --red:   #DC2626;
+  --teal:  #0E9AA7;
 
-  /* The console shell. Warm brass over near-black plastic -- deliberately
-     outside the navy palette so the device reads as an object on the page. */
+  /* Semantic aliases for the app pages. A price going up is the same green as
+     a passing check -- naming it twice keeps the market UI readable without
+     inventing a second palette. */
+  --buy:  var(--green);
+  --sell: var(--red);
+  --warn: var(--accent);
+
+  /* The console shell. Brass over near-black plastic, and the screen stays
+     dark in every theme -- a lit screen on a white page is the one place the
+     dark values belong. */
   --shell-lo:  #E8A72E;
   --shell-mid: #FFCA54;
   --shell-hi:  #FFE08A;
@@ -55,13 +70,12 @@
   --screen-2:  #1A1320;
   --phosphor:  #FFF8E7;
 
-  --dot:  rgba(233, 237, 245, 0.045);
-  --halo: rgba(255, 202, 84, 0.10);
+  --halo: rgba(229, 160, 13, 0.10);
 
   --radius:    14px;
   --radius-sm: 10px;
-  --shadow-soft: 0 16px 40px rgba(0, 0, 0, 0.38);
-  --glow: 0 10px 34px rgba(255, 202, 84, 0.16);
+  --shadow-soft: 0 14px 36px rgba(19, 23, 34, 0.10);
+  --glow: 0 10px 30px rgba(229, 160, 13, 0.18);
 
   --maxw:  1160px;
   --pad-x: 24px;
@@ -80,19 +94,21 @@ html { scroll-behavior: smooth; }
 body {
   margin: 0;
   background: var(--bg);
-  /* Faint dot grid + one amber halo behind the hero. Both fixed, so the page
-     scrolls over a still ground rather than dragging the texture with it. */
-  background-image:
-    radial-gradient(circle at 50% 0%, var(--halo) 0%, transparent 55%),
-    radial-gradient(var(--dot) 1px, transparent 1px);
-  background-size: 100% 900px, 22px 22px;
-  background-repeat: no-repeat, repeat;
-  background-attachment: fixed;
   color: var(--ink);
   font-family: var(--font-body);
   font-size: 15px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+}
+
+/* The one amber wash on the site, behind the landing hero only. It is fixed so
+   the page scrolls over a still ground, and it is scoped so the app pages stay
+   flat white. */
+.page-landing {
+  background-image: radial-gradient(circle at 50% 0%, var(--halo) 0%, transparent 55%);
+  background-size: 100% 760px;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
 }
 
 h1, h2, h3 { font-family: var(--font-display); font-weight: 700; line-height: 1.12; margin: 0; letter-spacing: -0.02em; }
@@ -129,7 +145,7 @@ code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
 
 nav {
   position: sticky; top: 0; z-index: 50;
-  background: rgba(10, 13, 20, 0.82);
+  background: rgba(255, 255, 255, 0.86);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
 }
@@ -175,8 +191,12 @@ nav {
 .btn.sm { padding: 8px 13px; font-size: 0.82rem; }
 .btn.lg { padding: 14px 22px; font-size: 0.98rem; }
 
-section { padding: 84px 0; }
-section + section { border-top: 1px solid var(--border); }
+/* Scoped to the landing page. A bare `section` rule here reached into the app
+   pages, where <section class="panel"> is a panel and not a page band -- every
+   panel header sat under 84px of dead space. Anything that styles a raw
+   element belongs behind .page-landing. */
+.page-landing section { padding: 84px 0; }
+.page-landing section + section { border-top: 1px solid var(--border); }
 .sec-head { max-width: 62ch; margin-inline: auto; margin-bottom: 44px; }
 .sec-head p { color: var(--muted); margin-top: 14px; }
 
@@ -281,7 +301,7 @@ footer {
   border: 3px solid var(--shell-ink);
   border-radius: var(--radius);
   box-shadow:
-    0 28px 70px rgba(0, 0, 0, 0.5),
+    0 24px 56px rgba(19, 23, 34, 0.28),
     inset 0 3px 0 rgba(255, 255, 255, 0.28),
     inset 0 -4px 0 rgba(0, 0, 0, 0.18);
   padding: 6px 8px 8px;
@@ -402,6 +422,50 @@ footer {
   border: 2px solid var(--shell-ink); background: #F0EAD2; color: var(--shell-ink);
 }
 .idc-tabs button.on { background: var(--shell-mid); }
+
+/* A plain single-pane bezel, for pages that put a live viewport in the shell
+   instead of the landing page's split screen + ID card. Same glass treatment:
+   glare and vignette on ::before, scanlines on ::after, both inert. */
+.dex-map { max-width: none; }
+.dex-screen {
+  position: relative;
+  border: 3px solid var(--shell-ink);
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--screen);
+  line-height: 0;
+}
+.dex-screen::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0.07) 7%, transparent 7.5%),
+    radial-gradient(130% 100% at 50% 42%, transparent 70%, rgba(8, 4, 16, 0.28) 100%);
+}
+.dex-screen::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 1;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.05) 0 1px, transparent 1px 3px);
+}
+
+/* VT323, not Press Start 2P: the pixel face has no arrow glyphs and dropped
+   the arrows to blanks. Anything with symbols in it goes in the LCD face. */
+.dex-hint-inline {
+  font-family: var(--font-lcd);
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  color: var(--shell-ink);
+  opacity: 0.75;
+}
+
+/* Same reason: a pixel-font "+" and "-" at 0.42rem is unreadable. The zoom
+   pair keeps the button shell but sets its own face and size. */
+.st-btn.glyph {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1;
+  min-width: 30px;
+  padding: 6px 9px;
+}
 
 .dex-ctrl { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 9px 8px 1px; }
 .dpad { position: relative; width: 30px; height: 30px; flex: none; }

@@ -4,8 +4,16 @@
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>{{ sim_code }} — Run Explorer</title>
-	<link rel="stylesheet" href="{% static 'css/trading_ui.css' %}">
-	<link rel="stylesheet" href="{% static 'css/run_explorer.css' %}">
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+	<!-- ?v= is a cache buster. The sheets are served by runserver with no
+	     fingerprint, and a browser holding the pre-redesign trading_ui.css --
+	     which declared its own dark :root -- renders this page half dark.
+	     Bump the token whenever a sheet changes. -->
+	<link rel="stylesheet" href="{% static 'css/anchor.css' %}?v=20260821b">
+	<link rel="stylesheet" href="{% static 'css/trading_ui.css' %}?v=20260821b">
+	<link rel="stylesheet" href="{% static 'css/run_explorer.css' %}?v=20260821b">
 </head>
 <body>
 
@@ -24,7 +32,7 @@
 -->
 
 <div class="topbar">
-	<div class="brand">AGENT<span>ANCHOR</span></div>
+	<a class="brand" href="/"><span class="mark">A</span>AGENT&nbsp;<span>ANCHOR</span></a>
 	<span class="chip">{{ sim_code }}</span>
 	{% if middleware_enabled is not None %}
 		<span class="arm-badge {% if middleware_enabled %}arm-mw{% else %}arm-base{% endif %}">
@@ -41,99 +49,121 @@
 
 <div class="rx-wrap">
 
-	<!-- ================================================ 1. THE VERDICT -->
-	<section class="rx-verdict">
-		<div class="rx-verdict-main">
+	<!--
+		The page is laid out as an audit report rather than a dashboard: a
+		letterhead that identifies the run, a stamped result, the instrument
+		readings, then the evidence. The stamp is the same rubber-stamp mark
+		the console prints on a blocked ticket -- the point of contact between
+		the two pages.
+
+		Order, by the question each zone answers:
+		  1. which run is this      -> letterhead
+		  2. what did the filter do -> the stamped result
+		  3. how should I read it   -> instrument strip
+		  4. show me it happening   -> timeline + inspector
+		  5. who did what           -> scorecards
+		  6. can I trust it         -> method, collapsed
+	-->
+
+	<!-- ============================================== 1. THE REPORT HEADER -->
+	<section class="rx-report">
+		<div class="rx-letterhead">
+			<div class="rx-ident">
+				<span class="rx-doc">Run report</span>
+				<h1 class="rx-sim">{{ sim_code }}</h1>
+				<div class="rx-arm">
+					{% if middleware_enabled is not None %}
+						{% if middleware_enabled %}Middleware arm &mdash; the action filter was live{% else %}Baseline arm &mdash; no action filter{% endif %}
+					{% else %}Arm not recorded &mdash; cannot say whether the filter was live{% endif %}
+				</div>
+			</div>
+			<dl class="rx-form">
+				<div><dt>Steps</dt><dd>{{ report.simulation_steps|default:last_step }}</dd></div>
+				<div><dt>Decisions</dt><dd>{{ report.total_decisions|default:"&mdash;" }}</dd></div>
+				<div><dt>Model</dt><dd class="{% if not model_name %}v-missing{% endif %}">{% if model_name %}{{ model_name }}{% else %}not recorded{% endif %}</dd></div>
+				<div><dt>Seed</dt><dd class="{% if seed is None %}v-missing{% endif %}">{% if seed is not None %}{{ seed }}{% else %}not recorded{% endif %}</dd></div>
+			</dl>
+		</div>
+
+		<!-- ================================================ 2. THE VERDICT -->
+		<div class="rx-result">
 			{% if headline.disposition_unknown %}
-				<div class="rx-score unknown"><b>{{ headline.caught }}</b><span>flagged</span></div>
-				<div class="rx-verdict-text">
-					<h1>disposition not recorded — cannot say what was stopped</h1>
-					<p>
-						This log predates the disposition field, so whether these requests were
-						blocked or executed was never written down.
-						<span class="sep">·</span>
-						<b>{{ headline.attempts|default:0 }}</b> trade attempts
-						<span class="sep">·</span>
-						{% if headline.rate is not None %}<b>{{ headline.rate }}%</b> flagged rate{% endif %}
-					</p>
+				<div class="rx-stamp unknown"><b>{{ headline.caught }}</b><i>flagged</i></div>
+				<div class="rx-result-text">
+					<h2>Disposition not recorded &mdash; cannot say what was stopped</h2>
+					<p>This log predates the disposition field, so whether these requests were
+					   blocked or executed was never written down.</p>
+					<ul class="rx-counts">
+						<li><b>{{ headline.attempts|default:0 }}</b><span>trade attempts</span></li>
+						{% if headline.rate is not None %}<li><b>{{ headline.rate }}%</b><span>flagged rate</span></li>{% endif %}
+					</ul>
 				</div>
 			{% elif headline.caught or headline.executed %}
-				<div class="rx-score {% if headline.executed %}breach{% else %}clean{% endif %}">
+				<div class="rx-stamp {% if headline.executed %}breach{% else %}clean{% endif %}">
 					<b>{{ headline.caught|default:0 }}</b>
-					<span>of {{ headline.caught|add:headline.executed }}</span>
+					<i>of {{ headline.caught|add:headline.executed }} stopped</i>
 				</div>
-				<div class="rx-verdict-text">
-					<h1>infeasible requests stopped before execution</h1>
-					<p>
-						<b class="{% if headline.executed %}bad{% else %}good{% endif %}">{{ headline.executed|default:0 }}</b>
-						reached the book
-						<span class="sep">·</span>
-						<b>{{ headline.attempts|default:0 }}</b> trade attempts
-						<span class="sep">·</span>
-						{% if headline.rate is not None %}
-							<b>{{ headline.rate }}%</b> hallucination rate
-						{% else %}
-							<b>N/A</b> rate
-						{% endif %}
-					</p>
+				<div class="rx-result-text">
+					<h2>Infeasible requests stopped before execution</h2>
+					<p>Every order was checked against the legal action list, the agent's real
+					   cash and its real positions before it could reach the book.</p>
+					<ul class="rx-counts">
+						<li class="{% if headline.executed %}bad{% else %}good{% endif %}"><b>{{ headline.executed|default:0 }}</b><span>reached the book</span></li>
+						<li><b>{{ headline.attempts|default:0 }}</b><span>trade attempts</span></li>
+						<li><b>{% if headline.rate is not None %}{{ headline.rate }}%{% else %}N/A{% endif %}</b><span>hallucination rate</span></li>
+					</ul>
 				</div>
 			{% else %}
-				<div class="rx-score none"><b>0</b></div>
-				<div class="rx-verdict-text">
-					<h1>no infeasible requests in this run</h1>
-					<p>
-						<b>{{ headline.attempts|default:0 }}</b> trade attempts, none rejected.
-						An empty result is a result — not a missing measurement.
-					</p>
+				<div class="rx-stamp none"><b>0</b><i>flagged</i></div>
+				<div class="rx-result-text">
+					<h2>No infeasible requests in this run</h2>
+					<p>An empty result is a result &mdash; not a missing measurement.</p>
+					<ul class="rx-counts">
+						<li><b>{{ headline.attempts|default:0 }}</b><span>trade attempts, none rejected</span></li>
+					</ul>
 				</div>
 			{% endif %}
 		</div>
 
-		<div class="rx-meta">
-			<div><span>steps</span><b>{{ report.simulation_steps|default:last_step }}</b></div>
-			<div><span>decisions</span><b>{{ report.total_decisions|default:"—" }}</b></div>
-			<div><span>model</span><b class="{% if not model_name %}v-missing{% endif %}">{% if model_name %}{{ model_name }}{% else %}not recorded{% endif %}</b></div>
-			<div><span>seed</span><b class="{% if seed is None %}v-missing{% endif %}">{% if seed is not None %}{{ seed }}{% else %}not recorded{% endif %}</b></div>
+		{% if headline.derived or not model_name or seed is None %}
+		<div class="rx-flags">
+			{% if headline.derived %}
+			<span class="rx-flag-item warn">
+				Figures derived from <code>trading_log.json</code> &mdash; this run has no
+				<code>hallucination_report.json</code>, so caught-vs-executed may be incomplete.
+			</span>
+			{% endif %}
+			{% if not model_name or seed is None %}
+			<span class="rx-flag-item">
+				Model/seed not recorded &mdash; do not compare against another run without
+				checking how each was launched.
+			</span>
+			{% endif %}
 		</div>
+		{% endif %}
 	</section>
 
-	{% if headline.derived or not model_name or seed is None %}
-	<div class="rx-flags">
-		{% if headline.derived %}
-		<span class="rx-flag-item warn">
-			Figures derived from <code>trading_log.json</code> — this run has no
-			<code>hallucination_report.json</code>, so caught-vs-executed may be incomplete.
-		</span>
-		{% endif %}
-		{% if not model_name or seed is None %}
-		<span class="rx-flag-item">
-			Model/seed not recorded — do not compare against another run without
-			checking how each was launched.
-		</span>
-		{% endif %}
-	</div>
-	{% endif %}
-
-	<!-- supporting figures: three, not eight -->
+	<!-- ============================================= 3. INSTRUMENT READINGS -->
 	<section class="rx-strip">
 		<div>
-			<b>{{ report.total_hallucination_episodes|default:"—" }}</b>
+			<b>{{ report.total_hallucination_episodes|default:"&mdash;" }}</b>
 			<span>distinct episodes</span>
 			<i>a big gap vs the raw count means one agent is livelocked</i>
 		</div>
 		<div>
-			<b>{{ report.total_state_contradictions|default:"—" }}</b>
+			<b>{{ report.total_state_contradictions|default:"&mdash;" }}</b>
 			<span>state contradictions</span>
-			<i>the only detector that scores a HOLD</i>
+			<i>the only detector that scores a <code>hold</code></i>
 		</div>
 		<div>
-			<b>{% if report.total_abstention_rate_pct is not None %}{{ report.total_abstention_rate_pct }}%{% else %}—{% endif %}</b>
+			<b>{% if report.total_abstention_rate_pct is not None %}{{ report.total_abstention_rate_pct }}%{% else %}&mdash;{% endif %}</b>
 			<span>abstention</span>
-			<i>read the rate against this — <code>hold</code> is legal by construction</i>
+			<i>read the rate against this &mdash; <code>hold</code> is legal by construction</i>
 		</div>
 	</section>
 
-	<!-- ============================================== 2. THE EVIDENCE -->
+	<!-- ==================================================== 4. THE EVIDENCE -->
+	<h3 class="rx-sec">The evidence</h3>
 	<div class="rx-cols">
 
 		<section class="panel">
@@ -160,7 +190,7 @@
 			<div class="panel-head">
 				<span>Decision inspector</span>
 				<div class="spacer"></div>
-				<span class="chip" id="insp_step">—</span>
+				<span class="chip" id="insp_step">&mdash;</span>
 			</div>
 			<div class="panel-body" id="insp_body">
 				<div class="detail-empty">
@@ -171,15 +201,16 @@
 		</section>
 	</div>
 
-	<!-- ================================================= 3. THE AGENTS -->
+	<!-- ====================================================== 5. THE AGENTS -->
+	<h3 class="rx-sec">Per-agent scorecards</h3>
 	<section class="rx-agents">
 		{% for a in agents %}
 		<div class="rx-agent">
 			<div class="rx-agent-head">
 				<b>{{ a.name }}</b>
-				<span>{{ a.snippet.trader_type }}{% if a.snippet.risk_tolerance %} · {{ a.snippet.risk_tolerance }} risk{% endif %}</span>
+				<span>{{ a.role }}{% if a.snippet.risk_tolerance %} &middot; {{ a.snippet.risk_tolerance }} risk{% endif %}</span>
 			</div>
-			<div class="rx-designed">designed to fail by {{ a.designed }}</div>
+			<div class="rx-designed">Designed to fail by {{ a.designed }}</div>
 			<div class="rx-agent-figs">
 				<div><b>{{ a.trades }}</b><span>trades</span></div>
 				<div><b>{{ a.longest_hold_streak }}</b><span>longest hold</span></div>
@@ -187,38 +218,38 @@
 			</div>
 			{% if a.kinds %}
 			<div class="rx-tags">
-				{% for k, v in a.kinds.items %}<span class="rx-tag bad">{{ k }} ×{{ v }}</span>{% endfor %}
+				{% for k, v in a.kinds.items %}<span class="rx-tag bad">{{ k }} &times;{{ v }}</span>{% endfor %}
 			</div>
 			{% endif %}
 		</div>
 		{% endfor %}
 	</section>
 
-	<!-- ============================================ 4. THE FINE PRINT -->
+	<!-- ================================================== 6. THE FINE PRINT -->
 	<details class="rx-details">
-		<summary>Method &amp; caveats — read before quoting any figure</summary>
+		<summary>Method &amp; caveats &mdash; read before quoting any figure</summary>
 		<div class="rx-details-body">
 			<ul>
-				<li><b>Hallucination rate</b> — denominator is every request that was not
+				<li><b>Hallucination rate</b> &mdash; denominator is every request that was not
 					<code>hold</code>/<code>analyze</code>. An allowlist undercounted and once
 					produced a rate above 100%.</li>
-				<li><b>Episodes vs raw count</b> — a large gap means one agent reissued the
+				<li><b>Episodes vs raw count</b> &mdash; a large gap means one agent reissued the
 					same rejected request every step. That is a livelock, not many
 					independent errors.</li>
-				<li><b>Stale context</b> — detector replaced outright in <code>4c6897e</code>.
-					Figures are not comparable to runs 02–05.</li>
-				<li><b>Persona consistency</b> — returns ~1.00 on about 99.8% of decisions.
+				<li><b>Stale context</b> &mdash; detector replaced outright in <code>4c6897e</code>.
+					Figures are not comparable to runs 02&ndash;05.</li>
+				<li><b>Persona consistency</b> &mdash; returns ~1.00 on about 99.8% of decisions.
 					No discriminative power; not shown on this page.</li>
-				<li><b>Cross-run comparison</b> — never compare a paired-harness result with
+				<li><b>Cross-run comparison</b> &mdash; never compare a paired-harness result with
 					an independent-arm result. Across seeds, report median and range; a
 					single seed supports no rate claim.</li>
-				<li><b>Older logs</b> — runs without a <code>requested</code> field cannot
+				<li><b>Older logs</b> &mdash; runs without a <code>requested</code> field cannot
 					separate "asked to trade and was refused" from "held with a malformed
 					field", and carry no disposition at all.</li>
 			</ul>
 			{% if compression %}
 			<p class="rx-fine">Memory compression averaged
-				<b>{{ compression.nodes_in }} → {{ compression.nodes_out }}</b> nodes per
+				<b>{{ compression.nodes_in }} &rarr; {{ compression.nodes_out }}</b> nodes per
 				decision over {{ compression.samples }} samples.</p>
 			{% endif %}
 			<p class="rx-fine">Reproduce:</p>

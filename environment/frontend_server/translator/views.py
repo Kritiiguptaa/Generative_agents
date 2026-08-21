@@ -549,9 +549,14 @@ def run_explorer(request, sim_code):
     for d in own:
       run_len = 0 if d["action"] in ("buy", "sell") else run_len + 1
       longest = max(longest, run_len)
+    snippet = sim_data.load_persona_snippet(sim_code, name)
     agents.append({
       "name": name,
-      "snippet": sim_data.load_persona_snippet(sim_code, name),
+      "snippet": snippet,
+      # trader_type is a slug in the persona files ("hedge_fund"). The card
+      # prints it as a title, and Django has no replace filter, so it is
+      # un-slugged here rather than left reading "Hedge_fund".
+      "role": (snippet.get("trader_type") or "").replace("_", " "),
       "designed": designed.get(name, ""),
       "stats": stats,
       "decisions": len(own),
@@ -659,10 +664,15 @@ def trading_poll(request, sim_code):
 
 def trading_persona_state(request, sim_code, step, persona_name):
   """
-  Per-agent detail panel for the trading map. Like replay_persona_state, but
+  Per-agent detail page for the trading map. Like replay_persona_state, but
   sourced from sim_data.py so it carries the requested step's decision,
   reasoning, and retry/fallback status alongside the static persona snippet
   from scratch.json -- not just the static snapshot.
+
+  The page also answers "what did the filter actually do to this agent", which
+  needs three fields the movement record doesn't carry (the raw request, the
+  hallucination kind, the disposition). Those come from build_decisions(),
+  matched on step+agent.
   """
   step = int(step)
   persona_name_underscore = persona_name
@@ -673,21 +683,76 @@ def trading_persona_state(request, sim_code, step, persona_name):
   step_record = replay["movement"].get(step, {}).get(persona_name)
 
   # Fall back to the nearest earlier step that has a record for this persona,
-  # since a given step may not have one for every agent.
+  # since a given step may not have one for every agent. record_step is the
+  # step the shown decision actually came from -- it is not always `step`, and
+  # labelling it as `step` would misreport the run.
+  record_step = step if step_record is not None else None
   if step_record is None:
     for s in sorted(replay["movement"].keys(), reverse=True):
       if s <= step and persona_name in replay["movement"][s]:
         step_record = replay["movement"][s][persona_name]
+        record_step = s
         break
+
+  # The filter's side of the same decision. Absent on older logs, which is a
+  # real distinction -- the template says so rather than showing a blank.
+  decision = None
+  agent_decisions = [d for d in sim_data.build_decisions(sim_code)
+                     if d["agent"] == persona_name]
+  if record_step is not None:
+    for d in agent_decisions:
+      if d["step"] == record_step:
+        decision = d
+        break
+
+  # Run-level totals for this agent, so the page reads as a dossier rather than
+  # a single frame. Same trade-attempt rule the run explorer uses.
+  trades = sum(1 for d in agent_decisions if d["action"] in ("buy", "sell"))
+  hallucinations = sum(1 for d in agent_decisions if d["hallucination"])
+
+  # The logged outcome string is a sentence plus, usually, the model reasoning
+  # appended verbatim. The reasoning is quoted in its own block below it, so
+  # echoing it twice on one card is noise -- keep only the sentence.
+  outcome = ""
+  if step_record:
+    outcome = (step_record.get("outcome") or "").strip()
+    reasoning = (step_record.get("reasoning") or "").strip()
+    if reasoning and reasoning in outcome:
+      outcome = outcome.replace(reasoning, "").strip()
+
+  # Thousands separators, done here rather than in the template: floatformat
+  # does not group, and humanize is not installed.
+  def _money(v):
+    try:
+      return "{:,.0f}".format(float(v))
+    except (TypeError, ValueError):
+      return None
+
+  peers = []
+  for p in replay["persona_names"]:
+    peers += [{"original": p,
+               "underscore": p.replace(" ", "_"),
+               "is_current": p == persona_name}]
 
   context = {
     "sim_code": sim_code,
     "step": step,
+    "record_step": record_step,
+    "is_stale_frame": record_step is not None and record_step != step,
     "persona_name": persona_name,
     "persona_name_underscore": persona_name_underscore,
     "snippet": snippet,
     "record": step_record,
     "has_record": step_record is not None,
+    "decision": decision,
+    "outcome": outcome,
+    "portfolio_value_fmt": _money(step_record.get("portfolio_value")) if step_record else None,
+    "cash_fmt": _money(step_record.get("cash")) if step_record else None,
+    "peers": peers,
+    "decision_count": len(agent_decisions),
+    "trades": trades,
+    "hallucinations": hallucinations,
+    "is_running": replay["is_running"],
   }
   template = "persona_state/trading_persona_state.html"
   return render(request, template, context)

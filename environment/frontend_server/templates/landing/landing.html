@@ -9,9 +9,13 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="{% static 'css/anchor.css' %}">
+<!-- ?v= is a cache buster. The sheets are served by runserver with no
+     fingerprint, and a browser holding the pre-redesign trading_ui.css --
+     which declared its own dark :root -- renders this page half dark.
+     Bump the token whenever a sheet changes. -->
+<link rel="stylesheet" href="{% static 'css/anchor.css' %}?v=20260821b">
 </head>
-<body>
+<body class="page-landing">
 
 <nav>
   <div class="nav-in">
@@ -201,7 +205,7 @@
 </footer>
 
 <script id="consoleData" type="application/json">{{ sims_json|safe }}</script>
-<script src="{% static 'js/anchor_console.js' %}"></script>
+<script src="{% static 'js/anchor_console.js' %}?v=20260821b"></script>
 
 </body>
 </html>
