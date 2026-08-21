@@ -128,7 +128,38 @@ def _console_payload(sim_code, meta, log):
       "last": last.get(name, ""),
     }]
 
-  return {"agents": agents, "flagged": sum(flagged.values())}
+  # The console replays the run rather than looping a canned animation: one
+  # entry per logged decision, in order, so the tickets flying to the market
+  # board are the orders these agents actually placed and the ones that get
+  # stamped BLOCKED are the ones the filter actually stopped.
+  index = {name: i for i, name in enumerate(names)}
+  timeline = []
+  for entry in log:
+    agent = entry.get("agent")
+    if agent not in index:
+      continue
+    decision = entry.get("decision") or {}
+    action = (decision.get("action") or "hold").lower()
+    requested = entry.get("requested") or {}
+    timeline += [{
+      "step": entry.get("step", 0),
+      "a": index[agent],
+      "action": action,
+      "symbol": decision.get("symbol") or requested.get("symbol") or "",
+      "qty": decision.get("quantity") or requested.get("quantity") or 0,
+      # What the model asked for, when that differs from what ran -- this is
+      # the pair the whole project exists to show side by side.
+      "req": (requested.get("action") or "").lower(),
+      "halluc": bool(entry.get("hallucination")),
+      "kind": entry.get("halluc_kind") or "",
+    }]
+
+  return {
+    "agents": agents,
+    "flagged": sum(flagged.values()),
+    "timeline": timeline,
+    "steps": (timeline[-1]["step"] + 1) if timeline else 0,
+  }
 
 
 def landing(request):
