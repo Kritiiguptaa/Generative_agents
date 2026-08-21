@@ -23,54 +23,45 @@ ACTION_ICONS = {
 }
 
 # ---------------------------------------------------------------------------
-# Office map geometry (static_dirs/assets/office/visuals/office.json, 44x32
-# tiles @16px). Every tile below was read out of the map's own authoring
-# matrices, not eyeballed -- see office-main/matrix/: game_object_maze.csv
-# labels desks as 32140 and the presentation screen as 32147,
-# arena_maze.csv marks the "open office bullpen" (32131) at x:16-42 y:2-15,
-# and collision_maze.csv is the walkability ground truth.
+# Office map geometry (static_dirs/assets/office/visuals/munder_office.json,
+# vendored from Munder Difflin -- see ATTRIBUTION.md in that directory -- 34x22
+# tiles @16px). Every tile below was read out of the map's own spawn-points /
+# zones object layers and its collision layer (see office.tmj), not eyeballed.
 #
-# The bullpen has three identical desk clusters (x:17-19, x:22-24, x:27-29,
-# desks on rows y=6/7 with computers above on y=5) -- one per trading agent.
+# This replaces the project's original 44x32 office.json geometry (the old
+# comments/constants are preserved in git history). Swapping the map is a
+# presentation-layer change -- it does not touch how trading_reverie.py or
+# action_filtering.py decide what an agent does, only where that decision
+# renders on screen.
 # ---------------------------------------------------------------------------
 
-# Where agents sit -- the chair itself (gid 941 on y=8), with the desk directly
-# above on y=6/7 and the monitor on y=5.
-#
-# These tiles are SOLID in the Collisions layer, which is correct: you cannot
-# walk through an occupied chair. The frontend's pathfinder special-cases a
-# blocked destination so an agent can take one final step into their own seat
-# (see find_path in main_script.html). Earlier these were x=17/22/27 -- the
-# walkable aisle tile beside the cluster -- which rendered every agent standing
-# a tile clear of their desk, as if permanently about to sit down.
+# The map's own spawn-points layer names six desks "pc-1".."pc-6" in a row at
+# y=13 (tile), three tiles apart. One per trading agent, in persona order.
 DESK_TILES = {
-    "Alex Chen": [18, 8],
-    "Marcus Webb": [23, 8],
-    "Sara Kim": [28, 8],
+    "Alex Chen": [2, 13],
+    "Marcus Webb": [6, 13],
+    "Sara Kim": [10, 13],
 }
 
-# The two presentation screens (game object 32147) span x:20-21 and x:24-25 on
-# rows y=2-3. Row y=4 beneath them is open floor, and x=22 sits centred
-# between the two screens -- that's the "check the market board" spot agents
-# walk to on a real BUY/SELL.
-MARKET_BOARD_TILE = [22, 4]
+# The map's "boardroom" zone (tiles x:9-17, y:3-7) is the meeting-room-with-a-
+# screen equivalent of the old map's presentation screens -- this tile sits
+# inside it on open floor (collision-verified), the "check the market board"
+# spot agents walk to on a real BUY/SELL.
+MARKET_BOARD_TILE = [13, 7]
 
-# Walkable extent of the market-board row inside the bullpen (collision_maze
-# shows y=4 clear from x=16 to x=42). Several agents commonly BUY on the same
-# step, so they're spread along this row instead of all stacking on one tile.
-MARKET_BOARD_SPAN = (16, 42)
+# Walkable extent of the boardroom's open floor row (collision layer: y=7 is
+# clear from x=9 to x=17). Several agents commonly BUY on the same step, so
+# they're spread along this row instead of all stacking on one tile.
+MARKET_BOARD_SPAN = (9, 17)
 
-# Fully-walkable aisle running the width of the bullpen (collision_maze.csv
-# shows y=9 clear for 38 tiles from x=5). Fallback meeting spot, used only when
-# an agent has no known desk position.
-MEETING_ROW = 9
+# The "pc" desk row (y=13) runs walkable from x=1 to x=24 (collision-verified).
+# Fallback meeting spot, used only when an agent has no known desk position.
+MEETING_ROW = 13
 
-# The lounge on the lower floor. Row 16 walls the bullpen off from everything
-# below it, with doorways at x=7-8 and x=32-33; the pathfinder routes through
-# them, so this is reachable from all three desks (BFS-verified: 23 tiles from
-# Alex's desk, 28 from Marcus's, 33 from Sara's). Agents meet here rather than
-# in the aisle one tile below their own desks, which read as "barely moved".
-MEETING_ROOM_TILE = [7, 21]
+# The map's "warroom-seat" spawn point -- a walkable tile just past the
+# boardroom zone, reachable from every desk via the open floor. Agents meet
+# here rather than at their own desks, which read as "barely moved".
+MEETING_ROOM_TILE = [23, 7]
 
 # trading_interactions.maybe_interaction() records a meeting on a single step,
 # but a conversation that appears and vanishes inside one 1600 ms replay tick is
@@ -83,15 +74,12 @@ MEETING_ROOM_TILE = [7, 21]
 # there was a no-op. Anyone who traded leaves for the market board as normal.
 MEETING_HOLD_STEPS = 3
 
-# Break area: the bank of vending machines in the lower-right room. The office
-# map already draws real appliances across x=26..32 on y=19 (solid in the
-# Collisions layer), and y=20 directly in front of them is clear -- so an agent
-# sent here stands AT a machine rather than on an anonymous patch of floor.
-# That matters because the previous spot was open floor and the only cue that
-# anything was happening was a 6px cup glyph over a 16px sprite.
+# Break area: the map's own cafeteria zone (tiles x:24-31, y:12-19), with a
+# "cafe-stand-coffee" spawn point at exactly this tile -- walkable and open in
+# the collision layer, right in front of the coffee machine.
 #
-# BREAK_STRIDE spaces the agents two tiles apart so each one lines up with its
-# own machine (26, 28, 30) instead of crowding a single one.
+# BREAK_STRIDE spaces the agents two tiles apart along the same open row
+# (x=25..30 is clear) instead of crowding a single tile.
 BREAK_ROOM_TILE = [26, 20]
 BREAK_STRIDE = 2
 

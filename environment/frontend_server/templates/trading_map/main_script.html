@@ -39,9 +39,10 @@
 	const POLL_INTERVAL_MS = 4000;
 	const STEP_MS = 1600;
 
-	// Map geometry -- office.json is 44x32 tiles at 16px.
+	// Map geometry -- munder_office.json (vendored from Munder Difflin, see
+	// ATTRIBUTION.md alongside it) is 34x22 tiles at 16px.
 	const TILE = 16;
-	const MAP_W_TILES = 44, MAP_H_TILES = 32;
+	const MAP_W_TILES = 34, MAP_H_TILES = 22;
 	const ZOOM = 2;
 
 	const config = {
@@ -62,6 +63,7 @@
 	let name_plates = {};
 	let plate_offset = {};      // per-agent nameplate dy, staggered in create()
 	let agent_order = {};       // per-agent 0..n index, used to stagger overlays
+	let desk_glow = {};         // per-agent monitor-glow dot, lit while rec.at_desk
 	let active_float = {};      // per-agent live floating label, at most one
 	let select_ring = null;
 	let game_scene = null;      // the Phaser scene, for tweens outside create()
@@ -78,18 +80,19 @@
 	// where every single person is permanently walking about reads as a station
 	// concourse, so most of these are working and only two are in motion.
 	//
-	// The desk tiles mirror the traders' own arrangement exactly: the agents
-	// stand on the aisle at y=8 facing up into the desks on y=6/7, and these
-	// stand on the aisle at y=13 facing up into the desks on y=11/12.
+	// Desk tiles are the map's own spawn-points (munder_office.json): the three
+	// traders sit at pc-1/2/3, so background staff take the remaining
+	// pc-4/5/6 and the lower desk row -- same arrangement, this map's own
+	// furniture layout instead of the old office.json's.
 	const NPC_ROUTES = [
-	  // Homes are the chair tiles (gid 941), same as the traders' -- solid in
-	  // Collisions, reachable because find_path allows a solid destination.
-	  {key: "npc_abigail",  role: "desk", home: [18, 13], stops: [[20, 10], [22, 14]]},
-	  {key: "npc_adam",     role: "desk", home: [28, 13], stops: [[30, 10], [22, 14]]},
-	  {key: "npc_rajiv",    role: "desk", home: [33, 13], stops: [[30, 10], [27, 14]]},
-	  {key: "npc_eddy",     role: "desk", home: [6, 4],   stops: [[10, 4], [3, 4]]},
-	  {key: "npc_jennifer", role: "roam", home: [6, 12],  stops: [[6, 12], [10, 14], [3, 10]]},
-	  {key: "npc_tamara",   role: "roam", home: [12, 19], stops: [[12, 19], [16, 23], [4, 18]]}
+	  // Homes are chair tiles -- solid in the collision layer, reachable
+	  // because find_path allows a solid destination (walk adjacent, step in).
+	  {key: "npc_abigail",  role: "desk", home: [14, 13], stops: [[20, 7], [16, 20]]},
+	  {key: "npc_adam",     role: "desk", home: [18, 13], stops: [[27, 5], [16, 20]]},
+	  {key: "npc_rajiv",    role: "desk", home: [22, 13], stops: [[30, 5], [23, 7]]},
+	  {key: "npc_eddy",     role: "desk", home: [2, 18],  stops: [[6, 18], [16, 20]]},
+	  {key: "npc_jennifer", role: "roam", home: [27, 14], stops: [[27, 14], [26, 20], [29, 13]]},
+	  {key: "npc_tamara",   role: "roam", home: [10, 18], stops: [[10, 18], [14, 18], [16, 20]]}
 	];
 	let light_overlay = null;   // daylight wash, driven by the simulated clock
 	let board_ticker = null;    // in-world price list on the market board
@@ -131,19 +134,29 @@
 	function preload() {
 	  this.load.crossOrigin = '';
 
-	  // Office tileset pack (office-main). Keys here are bound to the tileset
-	  // NAMES inside office.json via map.addTilesetImage(name, key) in create().
-	  this.load.image("room_builder", "{% static 'assets/office/visuals/tilesets/Room_Builder_Office_16x16.png' %}");
-	  this.load.image("modern_office", "{% static 'assets/office/visuals/tilesets/Modern_Office_16x16.png' %}");
-	  this.load.image("blocks", "{% static 'assets/office/visuals/tilesets/blocks.png' %}");
+	  // Office tileset -- vendored from Munder Difflin (LimeZu, non-commercial
+	  // license; see static_dirs/assets/office/visuals/ATTRIBUTION.md). Three
+	  // sheets: munder_office.json's own "office-tileset" plus the two LimeZu
+	  // packs it references (originally external .tsx tileset files, which
+	  // Phaser can't load -- re-embedded as plain tilesets when the map was
+	  // copied in). Keys here are bound to the tileset NAMES inside
+	  // munder_office.json via map.addTilesetImage(name, key) in create().
+	  this.load.image("office_tileset", "{% static 'assets/office/visuals/tilesets/office-tileset.png' %}");
+	  this.load.image("a5_office", "{% static 'assets/office/visuals/tilesets/a5-office-floors-walls.png' %}");
+	  this.load.image("interiors", "{% static 'assets/office/visuals/tilesets/interiors.png' %}");
 
-	  this.load.tilemapTiledJSON("map", "{% static 'assets/office/visuals/office.json' %}");
+	  this.load.tilemapTiledJSON("map", "{% static 'assets/office/visuals/munder_office.json' %}");
 
 	  {% for p in persona_names %}
-		  {% with 'assets/characters/'|add:p.underscore|add:'.png' as image_static %}
-			  this.load.atlas("{{p.underscore}}", "{% static image_static %}",
-			  										  		     "{% static 'assets/characters/atlas.json' %}");
-			{% endwith %}
+		  {% if p.underscore != "Alex_Chen" and p.underscore != "Marcus_Webb" and p.underscore != "Sara_Kim" %}
+			  {# The three traders get a procedurally-drawn texture instead (see
+			     procedural_cast.js) -- munder_office's look, not a sprite sheet.
+			     Anyone else (a hypothetical 4th agent) falls back to the atlas. #}
+			  {% with 'assets/characters/'|add:p.underscore|add:'.png' as image_static %}
+				  this.load.atlas("{{p.underscore}}", "{% static image_static %}",
+				  										  		     "{% static 'assets/characters/atlas.json' %}");
+				{% endwith %}
+		  {% endif %}
 	  {% endfor %}
 
 	  // Background staff. The office ships 28 character sheets and the sim only
@@ -162,26 +175,31 @@
 	  game_scene = this;
 	  const map = this.make.tilemap({ key: "map" });
 
-	  // Tileset names must match office.json's "tilesets"[].name exactly.
-	  const room_builder = map.addTilesetImage("room_builder", "room_builder");
-	  const modern_office = map.addTilesetImage("modern_office", "modern_office");
-	  const blocks = map.addTilesetImage("blocks", "blocks");
-	  const all_tilesets = [room_builder, modern_office, blocks];
+	  // Tileset names must match munder_office.json's "tilesets"[].name exactly
+	  // -- the second argument to addTilesetImage is just our loader key.
+	  const office_tileset = map.addTilesetImage("office-tileset", "office_tileset");
+	  const a5_office = map.addTilesetImage("a5-office-floors-walls", "a5_office");
+	  const interiors = map.addTilesetImage("interiors", "interiors");
+	  const all_tilesets = [office_tileset, a5_office, interiors];
 
-	  map.createLayer("Floor", all_tilesets, 0, 0);
-	  map.createLayer("Walls", all_tilesets, 0, 0);
-	  map.createLayer("Furniture L1", all_tilesets, 0, 0);
-	  map.createLayer("Furniture L2", all_tilesets, 0, 0);
-	  const foregroundL1Layer = map.createLayer("Foreground L1", all_tilesets, 0, 0);
-	  foregroundL1Layer.setDepth(4);
-	  // The blocks layers (Collisions, Arena/Sector/World/Spawning) are
-	  // authoring metadata painted with solid colour swatches, not scenery --
-	  // never rendered. Collisions is read below purely as the walkability
-	  // source for pathfinding.
+	  map.createLayer("floor", all_tilesets, 0, 0);
+	  map.createLayer("walls", all_tilesets, 0, 0);
+	  map.createLayer("furniture-below", all_tilesets, 0, 0);
+	  const furnitureAboveLayer = map.createLayer("furniture-above", all_tilesets, 0, 0);
+	  // Same role the old map's "Foreground L1" played: furniture whose top
+	  // half should draw OVER a character standing behind it (a monitor's
+	  // screen, a plant's leaves) sits in this layer, raised above the
+	  // characters' own depth (2).
+	  furnitureAboveLayer.setDepth(4);
+	  // "collision" is authoring metadata (which tiles are solid), never
+	  // rendered -- read below purely as the walkability source for
+	  // pathfinding. "spawn-points" and "zones" are object layers, not tile
+	  // layers, and createLayer() only draws tile layers, so both are already
+	  // skipped without needing to be named here.
 
 	  map_w = map.width;
 	  map_h = map.height;
-	  const coll = map.getLayer("Collisions").data;
+	  const coll = map.getLayer("collision").data;
 	  walkable = [];
 	  for (let y = 0; y < map_h; y++) {
 	    const row = [];
@@ -235,8 +253,8 @@
 	  board_flash = this.add.rectangle(board_px[0], board_px[1] - 40, 108, 46, 0xffffff, 0);
 	  board_flash.setDepth(4);
 	  board_ticker = this.add.text(board_px[0], board_px[1] - 34, "", {
-	    fontFamily: "monospace", fontSize: "5px", color: "#9aa4b5",
-	    backgroundColor: "#0b0e14dd", padding: {x: 4, y: 3},
+	    fontFamily: "monospace", fontSize: "5px", color: "#3d2e4a",
+	    backgroundColor: "#fff8e7ee", padding: {x: 4, y: 3},
 	    align: "left", lineSpacing: 1
 	  }).setOrigin(0.5, 1).setDepth(5).setResolution(3);
 
@@ -268,6 +286,13 @@
 	  const anims = this.anims;
 	  let agent_index = 0;
 	  for (const key in persona_init_pos) {
+	    // Munder-Difflin-style procedurally-drawn texture for the three real
+	    // traders (see procedural_cast.js) -- built here, before the sprite,
+	    // under frame names ("down"/"up"/"left"/"right",
+	    // "<dir>-walk.000".."003") that match what atlas.json already provided,
+	    // so nothing below this line needs to know which path a persona took.
+	    if (window.ProceduralCast) window.ProceduralCast.build_cast_texture(this, key);
+
 	    // Nameplates are staggered vertically by agent so that two people
 	    // standing on adjacent tiles (routine at the market board, where
 	    // sim_data spreads simultaneous traders along one row) don't overprint
@@ -313,10 +338,13 @@
 	    last_facing[key] = "down";
 
 	    // Small nameplate so you can tell who's who at a glance without
-	    // memorising three near-identical 16px sprites.
+	    // memorising three near-identical 16px sprites. Cream-on-ink pill,
+	    // matching the Munder Difflin office palette (cream-100 / ink-700)
+	    // rather than the console's dark HUD chrome -- this label sits ON an
+	    // agent's head, not behind the ANCHOR-1's glass.
 	    name_plates[key] = this.add.text(start_x, start_y + plate_dy, key.replace(/_/g, " "), {
-	      fontFamily: "monospace", fontSize: "6px", color: "#d6dbe5",
-	      backgroundColor: "#0b0e14cc", padding: {x: 2, y: 1}
+	      fontFamily: "monospace", fontSize: "6px", color: "#3d2e4a",
+	      backgroundColor: "#fff8e7", padding: {x: 2, y: 1}
 	    }).setOrigin(0.5, 0).setDepth(3).setResolution(3);
 
 	    // Action emoji above the head. 11px at 2x zoom reads clearly without
@@ -330,13 +358,31 @@
 	    // genuinely in an interaction -- see render_step(). The old build left
 	    // a 130x58px speech-bubble image permanently visible over every agent,
 	    // which on a 704px-wide map covered a fifth of the office at all times.
+	    // Styled as a light cream "thought cloud" (cream-50 fill, ink-700 text)
+	    // rather than the dark instrument-panel box, to match the Munder
+	    // Difflin office's ThoughtBubble treatment.
 	    const bubble_text = this.add.text(start_x, start_y - 32, "", {
-	      fontFamily: "monospace", fontSize: "6px", color: "#d6dbe5",
-	      backgroundColor: "#141922ee", padding: {x: 4, y: 3}, align: "center",
+	      fontFamily: "monospace", fontSize: "6px", color: "#3d2e4a",
+	      backgroundColor: "#fffdf5", padding: {x: 4, y: 3}, align: "center",
 	      wordWrap: {width: 120, useAdvancedWrap: true}
 	    }).setOrigin(0.5, 1).setDepth(6).setResolution(3);
 	    bubble_text.visible = false;
 	    chat_bubbles[key] = bubble_text;
+
+	    // Desk-monitor glow -- a small lit dot over the agent's head, on only
+	    // while rec.at_desk (render_step() toggles .visible). Stands in for
+	    // Munder Difflin's DeskScreen (a lit-monitor tile swap): this map's
+	    // office tileset doesn't expose an on/off monitor pair to swap gids on,
+	    // so a soft glow at the monitor's position reads the same cue --
+	    // "this desk is actively working" -- without touching the tileset.
+	    const glow = this.add.circle(start_x, start_y - 15, 3, 0x4f9faf, 0.7);
+	    glow.setDepth(1);
+	    glow.visible = false;
+	    desk_glow[key] = glow;
+	    this.tweens.add({
+	      targets: glow, alpha: 0.3, duration: 900 + idx * 130,
+	      yoyo: true, repeat: -1, ease: "Sine.easeInOut"
+	    });
 
 	    // Walk-cycle anims, same atlas frame names the original engine uses
 	    // (left-walk.000..003, etc, defined once for all personas in
@@ -583,6 +629,10 @@
 	    name_plates[key].y = sprite.y + plate_offset[key];
 	    chat_bubbles[key].x = sprite.x;
 	    chat_bubbles[key].y = sprite.y - 30;
+	    if (desk_glow[key]) {
+	      desk_glow[key].x = sprite.x;
+	      desk_glow[key].y = sprite.y - 15;
+	    }
 	  }
 
 	  if (select_ring && selected_key && personas[selected_key]) {
@@ -720,7 +770,7 @@
 	  }
 	  const t = game_scene.add.text(sprite.x + ox, sprite.y + oy, text, {
 	    fontFamily: "monospace", fontSize: "7px", color: color,
-	    backgroundColor: "#0b0e14cc", padding: {x: 2, y: 1}
+	    backgroundColor: "#fff8e7dd", padding: {x: 2, y: 1}
 	  }).setOrigin(0, 1).setDepth(7).setResolution(3);
 	  active_float[key] = t;
 	  game_scene.tweens.add({
@@ -745,11 +795,13 @@
 	    // in the detail panel and the decision log.
 	    let why = rec.error_reason || "rejected";
 	    if (why.length > 20) why = why.slice(0, 19) + "…";
-	    return {text: "✗ " + why, color: "#ff5d5d"};
+	    // coral -- Munder Difflin's accent for a hard stop, readable on the
+	    // cream float background (the old neon red assumed a dark box).
+	    return {text: "✗ " + why, color: "#d96a62"};
 	  }
 	  const d = rec.description || "";
-	  if (d.startsWith("BUY"))  return {text: d.replace(/^BUY\s*/, "+"), color: "#3ddc84"};
-	  if (d.startsWith("SELL")) return {text: d.replace(/^SELL\s*/, "−"), color: "#ffb454"};
+	  if (d.startsWith("BUY"))  return {text: d.replace(/^BUY\s*/, "+"), color: "#5ca97a"};  // mint
+	  if (d.startsWith("SELL")) return {text: d.replace(/^SELL\s*/, "−"), color: "#dcab3c"};  // lemon
 	  return null;
 	}
 
@@ -983,6 +1035,10 @@
 	      if (rec && rec.chat) { bubble.setText(rec.chat); bubble.visible = true; }
 	      else { bubble.visible = false; }
 	    }
+
+	    // Desk-monitor glow -- lit only while this agent is actually seated at
+	    // its own desk (rec.at_desk), same signal that faces it at the monitor.
+	    if (desk_glow[key]) desk_glow[key].visible = !!(rec && rec.at_desk);
 	  }
 
 	  render_cards();
