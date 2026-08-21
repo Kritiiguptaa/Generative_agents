@@ -75,6 +75,62 @@ def _split_associative_memory(associative):
 
   return a_mem_event, a_mem_chat, a_mem_thought
 
+# ---------------------------------------------------------------------------
+# landing-page console
+# ---------------------------------------------------------------------------
+
+def _console_payload(sim_code, meta, log):
+  """
+  Per-sim data for the handheld console on the landing page: where each agent
+  sits on the office floor, and the one-line summary its ID card shows.
+
+  Kept deliberately thin. The console is a preview, not a second run explorer,
+  so it carries counts and the last action -- never a claim about what the
+  middleware stopped, which only /run/ is allowed to make.
+  """
+  names = meta.get("persona_names", [])
+  desks = sim_data.load_desk_positions(sim_code, names)
+
+  # One pass over the log instead of one per agent; these runs reach a few
+  # thousand records and the index renders every sim.
+  last, trades, holds, flagged = {}, {}, {}, {}
+  for entry in log:
+    agent = entry.get("agent")
+    if agent is None:
+      continue
+    decision = entry.get("decision") or {}
+    action = (decision.get("action") or "hold").lower()
+    if action in ("buy", "sell"):
+      trades[agent] = trades.get(agent, 0) + 1
+    else:
+      holds[agent] = holds.get(agent, 0) + 1
+    if entry.get("hallucination"):
+      flagged[agent] = flagged.get(agent, 0) + 1
+    last[agent] = sim_data._action_description(decision)
+
+  agents = []
+  for name in names:
+    snippet = sim_data.load_persona_snippet(sim_code, name)
+    tile = desks.get(name) or [0, 0]
+    agents += [{
+      "name": name,
+      # trader_type is the closest thing the persona files carry to a job
+      # title; runs forked before it existed fall back to a neutral label.
+      # trader_type is stored as a slug ("hedge_fund"); the card shows it as a
+      # title, so it is un-slugged here rather than in three template filters.
+      "role": (snippet.get("trader_type") or "trading agent").replace("_", " "),
+      "risk": snippet.get("risk_tolerance") or "",
+      "watchlist": (snippet.get("watchlist") or [])[:4],
+      "x": tile[0], "y": tile[1],
+      "trades": trades.get(name, 0),
+      "holds": holds.get(name, 0),
+      "flagged": flagged.get(name, 0),
+      "last": last.get(name, ""),
+    }]
+
+  return {"agents": agents, "flagged": sum(flagged.values())}
+
+
 def landing(request):
   """
   Index of every sim in storage/ that actually has trading data, so the map
@@ -101,9 +157,31 @@ def landing(request):
         "is_running": status["is_running"],
         "is_trading": bool(log) or bool(
           set(meta.get("persona_names", [])) & set(sim_data.DESK_TILES)),
+        # Everything the console on the landing page draws and reads out. It is
+        # built here rather than fetched per-click because the whole index is a
+        # handful of small JSON files -- one pass at render time is cheaper than
+        # a poll endpoint, and it keeps the console honest: it can only show
+        # what the run actually recorded.
+        "console": _console_payload(name, meta, log),
       }]
   sims.sort(key=lambda s: (not s["is_trading"], -s["decisions"], s["sim_code"]))
-  context = {"sims": sims}
+  # The index also picks up Smallville village sims and half-created folders.
+  # They are real storage, so they stay listed -- but as a quiet name-only
+  # strip, not as full cards competing with the runs worth opening.
+  runs  = [s for s in sims if s["is_trading"] and s["decisions"]]
+  other = [s for s in sims if s not in runs]
+
+  context = {
+    "sims": sims,
+    "runs": runs,
+    "other": other,
+    # The console is driven client-side (canvas floor + ID card), so the same
+    # index the table renders is handed to JS as one blob rather than being
+    # re-fetched.
+    "sims_json": json.dumps(runs),
+    "total_decisions": sum(s["decisions"] for s in runs),
+    "total_flagged": sum(s["console"]["flagged"] for s in runs),
+  }
   template = "landing/landing.html"
   return render(request, template, context)
 
