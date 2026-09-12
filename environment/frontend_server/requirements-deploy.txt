@@ -1,0 +1,8 @@
+# Minimal dependencies actually imported by the Django frontend server
+# (translator/views.py, global_methods.py) — for deploying just the
+# web UI, not the offline simulation pipeline (which needs the full
+# requirements.txt: gensim, scikit-learn, matplotlib, nltk, etc.)
+Django==2.2
+django-cors-headers==2.5.3
+django-storages-redux==1.3.3
+numpy==1.19.5
