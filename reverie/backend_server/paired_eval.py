@@ -63,7 +63,11 @@ from trading_reverie import (
     # Two copies of it had already drifted apart; see the function's docstring.
     build_order_feedback,
 )
-from middleware.action_filtering import run_action_filtering_step, is_trade_request
+# run_action_filtering_step is deliberately NOT imported: the decision step is
+# composed by MiddlewareWrapper.decide(), so this harness cannot assemble a
+# different pipeline from the runner's.
+from middleware.action_filtering import is_trade_request
+from middleware.middleware_wrapper import MiddlewareWrapper
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.prompt_template.gpt_structure import ollama_request
 from market_perceive import market_perceive, record_trade_fill, record_order_feedback
@@ -158,11 +162,20 @@ class PairedEvaluation(TradingReverie):
         base_snap = _snapshot(persona)
 
         # --- middleware arm -------------------------------------------------
+        # Composed by MiddlewareWrapper, exactly as the runner composes it. This
+        # block previously called build_memory_context and
+        # run_action_filtering_step itself, which is how it was able to run a
+        # DIFFERENT middleware from the runner in run 06 without anything
+        # failing: it had simply omitted the ID-RAG graph updates. There is now
+        # one composition point and nothing here to get out of step.
         refresh_currently(persona, market)
-        mw_context, mc_stats = build_memory_context(
-            retrieved, persona, market, use_middleware=True)
-        mw_decision, mw_stats = run_action_filtering_step(
-            persona, market, mw_context, _call_llm, self.action_filter_log_path)
+        wrapper = MiddlewareWrapper(
+            action_log_path=self.action_filter_log_path)
+        prepared = wrapper.prepare(persona, market, retrieved)
+        mw_outcome = wrapper.decide(prepared, _call_llm)
+        mw_context = prepared.memory_context
+        mc_stats = prepared.compression_stats
+        mw_decision, mw_stats = mw_outcome.decision, mw_outcome.stats
         mw_score = _classify(persona, market, mw_decision, mw_stats)
         _restore(persona, base_snap)
 

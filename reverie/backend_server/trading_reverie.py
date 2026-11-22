@@ -72,7 +72,10 @@ from trading_persona    import TradingPersona
 from trading_daily_plan import ensure_daily_plan, apply_interaction_to_plan, current_focus_str
 from trading_interactions import maybe_interaction
 from middleware.action_filtering    import (
-    run_action_filtering_step,
+    # run_action_filtering_step is deliberately NOT imported: the decision step
+    # is composed by MiddlewareWrapper.decide(). The helpers below are used by
+    # the baseline arm's free_form_decision() and by the executor, which are
+    # not pipeline composition.
     log_action,
     _parse_json_response,
     _split_combined_action,
@@ -85,12 +88,18 @@ from middleware.persona_anchoring   import (
     score_persona_consistency,
     PERSONA_DRIFT_THRESHOLD,
 )
-from middleware.memory_compression  import compress_memories
 from middleware.id_rag import (
-    id_rag_anchor,
+    # id_rag_anchor is deliberately NOT imported here. The input-side steps are
+    # composed by MiddlewareWrapper.prepare(); calling them directly from a
+    # harness is what let the two harnesses drift. The graph updates below are
+    # step-level lifecycle, not pipeline composition, so they stay.
     update_graph_belief,
     update_graph_relationship,
     update_graph_current_situation,
+)
+from middleware.middleware_wrapper import (
+    MiddlewareWrapper,
+    raw_memory_context,
 )
 
 from persona.cognitive_modules.retrieve import new_retrieve
@@ -116,40 +125,25 @@ def build_memory_context(retrieved: dict,
     Returns (memory_context, compression_stats).
     """
     if use_middleware:
-        # Middleware layer: compress the retrieval output before it reaches the
-        # LLM. Replaces the old arbitrary nodes[:6] truncation.
-        memory_context, mc_stats = compress_memories(retrieved, persona, market)
-
-        # ID-RAG: retrieve only the identity facts relevant to this context
-        # and prepend them. Replaces the static full-block anchor.
-        memory_context = id_rag_anchor(persona, memory_context)
-        return memory_context, mc_stats
+        # Both input-side steps, compression then ID-RAG, now run inside
+        # MiddlewareWrapper.prepare(). They used to be called here and again in
+        # paired_eval.py, which is how run 06's defect 2 happened: one harness
+        # omitted the ID-RAG updates and silently ran a different middleware.
+        # One composition point, so there is nothing left to forget.
+        wrapper = MiddlewareWrapper()
+        prepared = wrapper.prepare(persona, market, retrieved)
+        return prepared.memory_context, prepared.compression_stats
 
     # Baseline: hand the LLM everything new_retrieve() returned, verbatim.
     # No dedup, no supersession pruning, no budget -- this is the raw
     # context the middleware exists to clean up.
-    raw_nodes = []
-    for nodes in retrieved.values():
-        raw_nodes.extend(nodes)
-    memory_context = "\n".join(n.description for n in raw_nodes)
-    # Report the size of the context even though nothing compressed it. This
-    # arm was observed choosing "analyze" on 100% of decisions, and the
-    # leading hypothesis is that the uncompressed block is large enough to
-    # crowd out the instruction -- untestable while the stats said only
-    # {"enabled": False}. nodes_out == nodes_in because nothing was dropped.
-    mc_stats = {
-        "enabled":           False,
-        "nodes_in":          len(raw_nodes),
-        "nodes_out":         len(raw_nodes),
-        "dropped_duplicate": 0,
-        "dropped_stale":     0,
-        "dropped_budget":    0,
-        "annotated_stale":   0,
-        "compression_ratio": 1.0,
-        "chars_in":          len(memory_context),
-        "chars_out":         len(memory_context),
-    }
-    return memory_context, mc_stats
+    #
+    # The concatenation and its stats live in middleware_wrapper so that the
+    # compression-disabled ablation arm and this arm cannot drift apart; the
+    # behaviour is unchanged, which tests/golden/ proves. This arm is NOT
+    # routed through the wrapper itself: it is the control, and an arm assembled
+    # from zero components would resemble it without being it.
+    return raw_memory_context(retrieved)
 
 
 def make_trading_decision(persona: TradingPersona,
@@ -178,9 +172,6 @@ def make_trading_decision(persona: TradingPersona,
       downstream code (execute_trading_action, _check_stale_reasoning,
       score_persona_consistency, _generate_report).
     """
-    memory_context, mc_stats = build_memory_context(
-        retrieved, persona, market, use_middleware)
-
     def _call_llm(prompt: str) -> str:
         # format="json": grammar-constrained decoding. phi3:mini otherwise
         #   intermittently emits invalid JSON syntax (bare `end="..."` keys,
@@ -202,21 +193,26 @@ def make_trading_decision(persona: TradingPersona,
                               temperature=temperature, seed=seed)
 
     if use_middleware:
-        decision, filter_stats = run_action_filtering_step(
-            persona,
-            market,
-            memory_context,
-            _call_llm,
-            action_log_path,
-        )
-    else:
-        decision, filter_stats = free_form_decision(
-            persona,
-            market,
-            memory_context,
-            _call_llm,
-            action_log_path,
-        )
+        # One composition point for the whole middleware arm: prepare() runs
+        # compression and ID-RAG, decide() runs the legal-action filter with its
+        # single retry and HOLD fallback. The wrapper delegates to the same
+        # functions this code called before and adds no logic of its own, so
+        # the default path is unchanged; tests/golden/ holds it to that.
+        wrapper = MiddlewareWrapper(action_log_path=action_log_path)
+        prepared = wrapper.prepare(persona, market, retrieved)
+        outcome = wrapper.decide(prepared, _call_llm)
+        return outcome.decision, outcome.compression_stats, outcome.stats
+
+    # Baseline arm keeps its own path, deliberately outside the wrapper.
+    memory_context, mc_stats = build_memory_context(
+        retrieved, persona, market, use_middleware=False)
+    decision, filter_stats = free_form_decision(
+        persona,
+        market,
+        memory_context,
+        _call_llm,
+        action_log_path,
+    )
     return decision, mc_stats, filter_stats
 
 
