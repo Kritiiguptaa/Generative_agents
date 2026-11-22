@@ -298,26 +298,50 @@ def _decision_rows(log: list) -> list:
     """
     Reduce the run log to the decision fields the paper's claims depend on.
 
-    Deliberately narrow: action, symbol, quantity, status and error reason are
-    what every rate in the report is computed from, so pinning these pins the
-    tables. The full log also carries reasoning text, which is model prose and
-    would make the file enormous without catching anything the counters miss.
+    The chosen action lives in the nested "decision" dict and the validator
+    outcome in "filter_status", not at the top level of the entry. Reading the
+    top level instead returns None for every field, which silently produces a
+    golden file that pins nothing: the first version of this function did
+    exactly that, and all 60 captured actions were null.
+
+    Reasoning text is reduced to a boolean. It is model prose, it would bloat
+    the file, and the only thing downstream depends on is whether it is empty,
+    since an empty reasoning scores clean on both the stale-context scan and
+    the persona score for free.
+
+    Cash and portfolio value are included because they are the cheapest
+    available proof that the whole trajectory, not merely each isolated
+    decision, is unchanged.
     """
     rows = []
     for entry in log:
         if not isinstance(entry, dict):
             continue
+        decision = entry.get("decision") or {}
+        compression = entry.get("compression") or {}
         rows.append(_scrub({
             "step": entry.get("step"),
             "agent": entry.get("agent"),
-            "action": entry.get("action"),
-            "symbol": entry.get("symbol"),
-            "quantity": entry.get("quantity"),
-            "status": entry.get("status"),
+            "action": decision.get("action"),
+            "symbol": decision.get("symbol"),
+            "quantity": decision.get("quantity"),
+            "has_reasoning": bool((decision.get("reasoning") or "").strip()),
+            "filter_status": entry.get("filter_status"),
             "error_reason": entry.get("error_reason"),
             "illegal_request": entry.get("illegal_request"),
-            "disposition": entry.get("disposition"),
-            "context_chars": entry.get("context_chars"),
+            "outcome": entry.get("outcome"),
+            "hallucination": entry.get("hallucination"),
+            "halluc_kind": entry.get("halluc_kind"),
+            "halluc_disposition": entry.get("halluc_disposition"),
+            "requested": entry.get("requested") or {},
+            "requested_quantity": entry.get("requested_quantity"),
+            "filled_quantity": entry.get("filled_quantity"),
+            # Compressed memory size, which is the quantity the compression
+            # stage controls. Note this excludes the ID-RAG identity block,
+            # because chars_out is measured before the anchor is prepended.
+            "context_chars": compression.get("chars_out"),
+            "cash": entry.get("cash"),
+            "portfolio_value": entry.get("portfolio_value"),
         }))
     return rows
 
