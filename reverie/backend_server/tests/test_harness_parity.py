@@ -255,51 +255,33 @@ class HarnessParityTest(unittest.TestCase):
     """
     Both harnesses must put the same middleware in front of the model.
 
-    BOTH TESTS BELOW ARE CURRENTLY EXPECTED FAILURES. They are not aspirational
-    and they are not broken: they found a live divergence on the first run, of
-    the same class as run 06's defect 2 and in a place that defect's fix did not
-    reach. It is recorded here rather than silently repaired because fixing it
-    changes the paired harness's behaviour, which is a decision for the project
-    owner and not something to slip into a refactor.
+    WHAT THIS CAUGHT WHEN IT WAS FIRST WRITTEN
+    A live divergence, of the same class as run 06's defect 2 and in a place
+    that defect's fix did not reach: the two harnesses wrote different
+    order-feedback memories for the same rejection.
 
-    THE DIVERGENCE
-    The two harnesses write different order-feedback memories for the same
-    rejection.
-
-    The runner, trading_reverie.py:1198-1213, picks between three branches and
-    includes the specific reason:
+    The runner picked between three branches and named the specific reason,
         "...order to buy 9999 NVDA was REJECTED: quantity outside legal limit.
          Cash $402,600. Do not repeat this order unless..."
-    with separate wording for a filtered order and for a clamped one ("the
-    order was reduced"), and it fires on `illegal_request and
-    is_trade_request(req)`.
+    with separate wording for a refused order and for a resized one, firing on
+    `illegal_request and is_trade_request(req)`. The paired harness had a single
+    branch and a generic string,
+        "...order to buy 9999 NVDA was REJECTED/ADJUSTED. Cash $402,600..."
+    firing on `driver["score"]["infeasible"]`, a different condition.
 
-    The paired harness, paired_eval.py:241-248, has a single branch and a
-    generic string:
-        "...order to buy 9999 NVDA was REJECTED/ADJUSTED. Cash $402,600.
-         Do not repeat this order unless..."
-    and it fires on `driver["score"]["infeasible"]`, a different condition.
+    That feedback is a memory node, so it entered retrieval and changed every
+    later decision; CHANGES.md 23.7 records that this same feedback is what
+    broke the run-05 livelock. With 6 steps and seed 42, decision prompts 0 to 4
+    were byte identical and divergence began at prompt 5, immediately after the
+    first rejection was written. The identity anchor then differed too, which
+    was downstream of the feedback rather than a second fault, since the graphs
+    agreed until that first write.
 
-    WHY IT MATTERS
-    That feedback is a memory node, so it enters retrieval and shapes every
-    later decision. CHANGES.md 23.7 records that feeding rejections back is
-    precisely what broke the run-05 livelock, 48 rejections collapsing into 1
-    episode, so this text is load-bearing rather than cosmetic.
-
-    Observed with 6 steps and seed 42: decision prompts 0 to 4 are byte
-    identical, and the first divergence appears at prompt 5, immediately after
-    the first rejection is written to memory. The anchor block then differs too,
-    the runner retrieving TRAIT analytical and RISK_PROFILE where the paired
-    harness retrieves BACKGROUND and TRAIT disciplined, which is downstream of
-    the feedback difference rather than a second independent fault: the graphs
-    agree until the first feedback write.
-
-    WHEN IT IS FIXED
-    Remove the expectedFailure decorators. unittest reports a fixed
-    expectedFailure as an unexpected success, so the suite will tell you.
+    Fixed by trading_reverie.build_order_feedback(), one definition called by
+    both harnesses. These tests are what hold it closed, so a future change
+    that reintroduces per-harness pipeline logic fails here.
     """
 
-    @unittest.expectedFailure
     def test_middleware_decisions_match_across_harnesses(self):
         """
         The runner and the paired harness must agree decision for decision.
@@ -334,7 +316,6 @@ class HarnessParityTest(unittest.TestCase):
                 f"divergence later points at state drift.",
             )
 
-    @unittest.expectedFailure
     def test_decision_prompts_match_across_harnesses(self):
         """
         Both harnesses must send the model the same middleware decision prompts.
@@ -375,6 +356,139 @@ class HarnessParityTest(unittest.TestCase):
                 f"middleware decision prompt {index} differs between "
                 f"harnesses while being the same length",
             )
+
+
+class OrderFeedbackTest(unittest.TestCase):
+    """
+    Unit coverage for the shared order-rejection memory.
+
+    The parity test above exercises this function end to end, but only through
+    whichever branches a 6-step run happens to hit. These pin each branch
+    directly, including the distinction between an order that was refused and
+    one that was resized and filled anyway, which is the distinction the paired
+    harness used to collapse.
+    """
+
+    @staticmethod
+    def _result(filtered=False, hallucination=False, filled=0, requested=0,
+                outcome="Alex Chen BUYS 0 NVDA."):
+        """Build an execute_trading_action-shaped result for one branch."""
+        return {
+            "filtered": filtered,
+            "hallucination": hallucination,
+            "filled_quantity": filled,
+            "requested_quantity": requested,
+            "outcome_str": outcome,
+        }
+
+    def test_illegal_request_names_the_validator_reason(self):
+        """An illegal trade request is reported with the reason it failed."""
+        from trading_reverie import build_order_feedback
+        text = build_order_feedback(
+            name="Alex Chen",
+            requested={"action": "buy", "symbol": "NVDA", "quantity": 9999},
+            illegal_request=True,
+            error_reason="quantity outside legal limit",
+            result=self._result(),
+            cash=402600.0,
+        )
+        self.assertIn("REJECTED: quantity outside legal limit", text)
+        self.assertIn("buy 9999 NVDA", text)
+        self.assertIn("$402,600", text)
+
+    def test_illegal_request_without_a_reason_still_says_something(self):
+        """
+        A missing reason falls back to fixed wording rather than an empty one.
+
+        An empty reason would produce "was REJECTED: ." which tells the agent
+        nothing about what to avoid, and the whole point of this memory is to
+        stop the agent reissuing the same order.
+        """
+        from trading_reverie import build_order_feedback
+        text = build_order_feedback(
+            name="Sara Kim",
+            requested={"action": "short", "symbol": "NVDA", "quantity": 10},
+            illegal_request=True,
+            error_reason="",
+            result=self._result(),
+            cash=1000.0,
+        )
+        self.assertIn("not a permitted action", text)
+
+    def test_filtered_order_reports_the_outcome(self):
+        """An order the executor refused outright quotes the outcome string."""
+        from trading_reverie import build_order_feedback
+        text = build_order_feedback(
+            name="Marcus Webb",
+            requested={"action": "sell", "symbol": "GOOGL", "quantity": 5},
+            illegal_request=False,
+            error_reason="",
+            result=self._result(filtered=True,
+                                outcome="Marcus Webb cannot sell GOOGL: none held."),
+            cash=25000.0,
+        )
+        self.assertIn("REJECTED", text)
+        self.assertIn("none held", text)
+        self.assertNotIn("was reduced", text)
+
+    def test_resized_order_says_it_was_reduced(self):
+        """
+        A clamped order reports the reduction, not a rejection.
+
+        This is the branch the paired harness lost entirely: it emitted the
+        same generic "REJECTED/ADJUSTED" for an order that actually filled at a
+        smaller size, so the agent was told its order failed when it had not.
+        """
+        from trading_reverie import build_order_feedback
+        text = build_order_feedback(
+            name="Marcus Webb",
+            requested={"action": "buy", "symbol": "AMD", "quantity": 100},
+            illegal_request=False,
+            error_reason="",
+            result=self._result(hallucination=True, filled=7, requested=100),
+            cash=120.0,
+        )
+        self.assertIn("requested 100 shares", text)
+        self.assertIn("only 7 were permitted", text)
+        self.assertIn("was reduced", text)
+        self.assertNotIn("REJECTED", text)
+
+    def test_a_clean_order_produces_no_memory(self):
+        """
+        Nothing is written when the order went through.
+
+        The caller treats "" as "write no memory at all", so returning any
+        string here would add a spurious rejection note to every clean trade.
+        """
+        from trading_reverie import build_order_feedback
+        text = build_order_feedback(
+            name="Alex Chen",
+            requested={"action": "buy", "symbol": "AAPL", "quantity": 1},
+            illegal_request=False,
+            error_reason="",
+            result=self._result(filled=1, requested=1),
+            cash=400000.0,
+        )
+        self.assertEqual(text, "")
+
+    def test_an_illegal_non_trade_request_produces_no_memory(self):
+        """
+        A HOLD flagged illegal writes nothing, because there is no order to warn
+        about.
+
+        is_trade_request() is what makes this true, and it is also why an
+        invented verb still gets feedback: that case IS a trade request.
+        """
+        from trading_reverie import build_order_feedback
+        text = build_order_feedback(
+            name="Alex Chen",
+            requested={"action": "hold", "symbol": None, "quantity": 0},
+            illegal_request=True,
+            error_reason="HOLD was not in legal list",
+            result=self._result(),
+            cash=400000.0,
+        )
+        self.assertEqual(text, "")
 
 
 if __name__ == "__main__":

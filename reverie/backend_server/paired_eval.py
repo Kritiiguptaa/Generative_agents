@@ -59,6 +59,9 @@ from trading_reverie import (
     check_state_grounding,
     _check_stale_reasoning,
     execute_trading_action,
+    # One definition of the order-rejection memory, shared with the runner.
+    # Two copies of it had already drifted apart; see the function's docstring.
+    build_order_feedback,
 )
 from middleware.action_filtering import run_action_filtering_step, is_trade_request
 from persona.cognitive_modules.retrieve import new_retrieve
@@ -238,13 +241,26 @@ class PairedEvaluation(TradingReverie):
             record_trade_fill(persona, self.market, result["fill"])
 
         req = driver["stats"].get("requested") or {}
-        if driver["score"]["infeasible"]:
-            record_order_feedback(
-                persona, self.market,
-                f"{name}'s order to {req.get('action')} {req.get('quantity')} "
-                f"{req.get('symbol')} was REJECTED/ADJUSTED. "
-                f"Cash ${persona.scratch.cash_balance:,.0f}. "
-                f"Do not repeat this order unless the position or cash changes.")
+        # Shared with TradingReverie._step_agent rather than written out again.
+        # This block used to be a single branch emitting a generic
+        # "REJECTED/ADJUSTED", triggered on score["infeasible"], where the
+        # runner picked between three branches, named the validator's reason and
+        # distinguished a refused order from a resized one. Both harnesses
+        # therefore wrote DIFFERENT memories for the same rejection, and since
+        # that memory enters retrieval, their agents diverged from the first
+        # rejection onward while claiming to run identical configurations.
+        # Observed with seed 42: decision prompts were byte identical up to the
+        # first rejection and diverged immediately after it.
+        feedback = build_order_feedback(
+            name=name,
+            requested=req,
+            illegal_request=bool(driver["stats"].get("illegal_request")),
+            error_reason=driver["stats"].get("error_reason") or "",
+            result=result,
+            cash=persona.scratch.cash_balance,
+        )
+        if feedback:
+            record_order_feedback(persona, self.market, feedback)
 
         pair = {
             "step": step,

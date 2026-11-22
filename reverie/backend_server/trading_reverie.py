@@ -643,6 +643,74 @@ _NEWS_STOPWORDS = frozenset({
     "supply", "deliveries", "safety", "filing", "print",
 })
 
+def build_order_feedback(name: str,
+                         requested: dict,
+                         illegal_request: bool,
+                         error_reason: str,
+                         result: dict,
+                         cash: float) -> str:
+    """
+    Compose the memory note that tells an agent its order was refused.
+
+    Returns "" when there is nothing to report, in which case the caller writes
+    no memory at all.
+
+    WHY THIS IS A SHARED FUNCTION AND NOT INLINE
+    It used to be written out twice, once in TradingReverie._step_agent and once
+    in PairedEvaluation._step_agent, and the two copies did not agree. The
+    runner named the specific reason and distinguished a rejected order from a
+    clamped one; the paired harness had a single branch emitting a generic
+    "REJECTED/ADJUSTED" on a different trigger condition. Same event, different
+    memory, so the two harnesses' agents diverged from the first rejection
+    onward while appearing to run identical configurations. That is the same
+    class of fault as run 06's defect 2, which was a paired harness silently
+    running a different middleware. One definition, two callers, so it cannot
+    recur.
+
+    WHY THE WORDING MATTERS AT ALL
+    This string becomes a memory node, so it enters retrieval and shapes every
+    later decision. Feeding rejections back is also the thing that broke the
+    run-05 livelock, where 48 of Alex Chen's rejections collapsed into a single
+    distinct episode because nothing in memory recorded that the order had
+    failed (CHANGES.md 23.7). It is load bearing, not cosmetic.
+
+    ARGS
+      name:            agent name, used in the note's text.
+      requested:       the pre-correction request, from stats["requested"].
+      illegal_request: True when the model asked for an illegal trade, as
+                       opposed to merely emitting malformed JSON.
+      error_reason:    the validator's reason, from stats["error_reason"].
+      result:          the execute_trading_action() result dict.
+      cash:            the agent's cash balance after execution.
+
+    The three branches are mutually exclusive and ordered deliberately:
+      1. an illegal trade request, caught before execution;
+      2. an order the executor refused outright;
+      3. an order the executor resized and then filled anyway.
+    is_trade_request() rather than a plain action check, because a request
+    rejected as "action type is invalid" otherwise got no feedback at all and
+    the agent reinvented the same bad verb on the next step forever.
+    """
+    if illegal_request and is_trade_request(requested):
+        return (
+            f"{name}'s order to {requested['action']} "
+            f"{requested.get('quantity')} {requested.get('symbol')} "
+            f"was REJECTED: "
+            f"{error_reason or 'not a permitted action'}. "
+            f"Cash ${cash:,.0f}. "
+            f"Do not repeat this order unless the position or cash changes.")
+    if result["filtered"]:
+        return (
+            f"{name}'s order was REJECTED: {result['outcome_str']} "
+            f"Do not repeat this order unless the position or cash changes.")
+    if result["hallucination"] and result["filled_quantity"]:
+        return (
+            f"{name} requested {result['requested_quantity']} shares but "
+            f"only {result['filled_quantity']} were permitted; the order "
+            f"was reduced. Cash ${cash:,.0f}.")
+    return ""
+
+
 # How old a headline must be before citing it is even potentially stale.
 STALE_MIN_AGE_STEPS = 20
 # How many distinctive tokens from one headline the reasoning must contain
@@ -1186,31 +1254,18 @@ class TradingReverie:
 
         # 7b. Feed the failure back so the agent can see it happened. Both arms,
         # for the reason documented on record_order_feedback().
-        feedback = ""
         req = filter_stats.get("requested") or {}
-        # is_trade_request, not ("buy", "sell"): an agent whose request was
-        # rejected as "action type is invalid" got NO feedback under the old
-        # gate, so nothing in its memory recorded that the verb it invented does
-        # not exist -- and it asked again on the next step, forever. That is
-        # exactly the run-05 livelock, where Alex Chen's 48 rejections collapsed
-        # into 1 distinct episode. Feeding the rejection back is the only thing
-        # that can break it.
-        if illegal_request and is_trade_request(req):
-            feedback = (
-                f"{name}'s order to {req['action']} {req.get('quantity')} "
-                f"{req.get('symbol')} was REJECTED: "
-                f"{filter_stats.get('error_reason') or 'not a permitted action'}. "
-                f"Cash ${persona.scratch.cash_balance:,.0f}. "
-                f"Do not repeat this order unless the position or cash changes.")
-        elif result["filtered"]:
-            feedback = (
-                f"{name}'s order was REJECTED: {outcome} "
-                f"Do not repeat this order unless the position or cash changes.")
-        elif result["hallucination"] and result["filled_quantity"]:
-            feedback = (
-                f"{name} requested {result['requested_quantity']} shares but "
-                f"only {result['filled_quantity']} were permitted; the order "
-                f"was reduced. Cash ${persona.scratch.cash_balance:,.0f}.")
+        # Shared with PairedEvaluation._step_agent. These branches used to be
+        # written out here and again there, and the two copies disagreed: see
+        # build_order_feedback() for what diverged and why it mattered.
+        feedback = build_order_feedback(
+            name=name,
+            requested=req,
+            illegal_request=illegal_request,
+            error_reason=filter_stats.get("error_reason") or "",
+            result=result,
+            cash=persona.scratch.cash_balance,
+        )
         if feedback:
             record_order_feedback(persona, self.market, feedback)
 
