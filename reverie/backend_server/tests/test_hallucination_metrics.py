@@ -25,7 +25,7 @@ from trading_reverie import (refresh_currently, check_state_grounding,
                              _count_episodes, execute_trading_action)
 from middleware.action_filtering import (get_legal_actions, build_prompt,
                                          _get_spendable_budget)
-from middleware.persona_anchoring import (score_persona_consistency,
+from middleware.persona_anchoring import (score_persona_consistency, hold_rate_drift,
                                           PERSONA_DRIFT_THRESHOLD)
 
 
@@ -211,6 +211,34 @@ class PersonaWatchlistCheck(unittest.TestCase):
 
     def test_empty_reasoning_is_unscoreable_not_perfect(self):
         self.assertIsNone(score_persona_consistency("   ", self.agent))
+
+    def test_buying_off_watchlist_is_drift_even_without_reasoning(self):
+        score = score_persona_consistency(
+            "", self.agent, {"action": "buy", "symbol": "GOOGL", "quantity": 5})
+        self.assertLessEqual(score, PERSONA_DRIFT_THRESHOLD)
+
+    def test_buying_on_watchlist_is_scored_in_character(self):
+        self.assertEqual(1.0, score_persona_consistency(
+            "", self.agent, {"action": "buy", "symbol": "TSLA", "quantity": 5}))
+
+    def test_selling_off_watchlist_holding_is_not_drift(self):
+        # Exiting a position is in character; only the reasoning is scored.
+        self.assertIsNone(score_persona_consistency(
+            "", self.agent, {"action": "sell", "symbol": "GOOGL", "quantity": 5}))
+
+    def test_bought_symbol_is_not_scored_twice_via_reasoning(self):
+        # One off-watchlist buy is one violation, not two: the language check
+        # also runs for an aggressive agent and passes, so 1 of 2 -> 0.5.
+        score = score_persona_consistency(
+            "Buying GOOGL.", self.agent, {"action": "buy", "symbol": "GOOGL"})
+        self.assertEqual(0.5, score)
+
+    def test_aggressive_agent_holding_most_of_run_is_drift(self):
+        self.assertTrue(hold_rate_drift(0.7, self.agent))
+        self.assertFalse(hold_rate_drift(0.4, self.agent))
+
+    def test_moderate_agent_holding_all_run_is_not_drift(self):
+        self.assertFalse(hold_rate_drift(1.0, _Agent(tol="moderate", watchlist=("NVDA",))))
 
 
 class VenueRejection(unittest.TestCase):

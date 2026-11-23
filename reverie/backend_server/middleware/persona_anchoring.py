@@ -45,6 +45,15 @@ from typing import Optional
 # fire. Use `score <= PERSONA_DRIFT_THRESHOLD` at call sites.
 PERSONA_DRIFT_THRESHOLD = 0.5
 
+# An aggressive agent that HOLDs on more than this fraction of its decisions is
+# out of character for the run, whatever its reasoning says. The per-decision
+# score cannot see this: a HOLD that names no symbol and uses no fearful phrase
+# passes every check, which is how Marcus Webb ("buy on breakouts and dips, go
+# big") held 70% of a smoke run while scoring 1.00.
+# shortcut: 0.5 is a judgement call, not calibrated; replace with the baseline
+# arm's measured hold rate once the run 07 sweep gives one.
+AGGRESSIVE_MAX_HOLD_RATE = 0.5
+
 
 def _normalise_risk_tolerance(raw: Optional[str]) -> str:
     """
@@ -205,21 +214,26 @@ def _mentions_symbol(reasoning_upper: str, symbol: str) -> bool:
                for alias in _SYMBOL_ALIASES.get(symbol, ()))
 
 
-def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
+def score_persona_consistency(reasoning: str, persona,
+                              requested: Optional[dict] = None) -> Optional[float]:
     """
     Heuristic consistency score in [0.0, 1.0], or None when not scoreable.
 
-    Checks up to three independent dimensions; each violation subtracts from 1.0:
+    Checks up to two independent dimensions; each violation subtracts from 1.0:
       - Language-risk mismatch  (aggressive words for conservative agent, etc.)
-      - Watchlist blindness      (agent ignores stocks it's supposed to track)
-      - Circular / stale signal  (agent references prior context as justification)
+      - Watchlist               (BUYING an off-watchlist symbol, or, when no
+                                 trade was requested, naming only off-watchlist
+                                 symbols in the reasoning)
 
-    Returns None when there is nothing to score -- either the model produced no
-    reasoning at all (every parser fallback has reasoning="") or the persona
-    defines none of the fields the checks read. Scoring an empty string is not a
-    measurement of character: it violates the watchlist check by construction and
-    passes the other two for free, which is exactly how a decision the model
-    never actually made ended up recorded as in-character.
+    `requested` is the order the model asked for, BEFORE the filter touched it.
+    What the agent tried to do is better evidence of character than what it
+    wrote, and it is scoreable even when the reasoning is empty.
+
+    Returns None when there is nothing to score -- no reasoning and no trade
+    request, or a persona defining none of the fields the checks read. Scoring
+    an empty string is not a measurement of character: it violates the watchlist
+    check by construction and passes the others for free, which is exactly how
+    a decision the model never actually made ended up recorded as in-character.
 
     The denominator counts only the checks that ran. It used to be hard-coded to
     3 even though the language check is skipped for moderate agents, so those
@@ -227,8 +241,7 @@ def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
     """
     s = persona.scratch
     reasoning = (reasoning or "").strip()
-    if not reasoning:
-        return None
+    requested = requested or {}
 
     risk_tolerance  = _normalise_risk_tolerance(getattr(s, "risk_tolerance", None))
     watchlist       = [sym.upper() for sym in getattr(s, "watchlist", [])]
@@ -238,10 +251,26 @@ def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
     violations = 0
     checks     = 0
 
+    # 0. Buying off the watchlist. Only BUY: selling an off-watchlist holding is
+    #    exiting a position, which is in character for any profile. Not a
+    #    hallucination either -- the symbol exists and the order is legal -- so
+    #    this does not double-count anything the filter already reports.
+    #    When it runs it replaces the reasoning-symbol check below, so one act
+    #    is not scored twice for naming the stock it bought.
+    bought = str(requested.get("symbol") or "").upper()
+    buy_checked = (str(requested.get("action") or "").lower() == "buy"
+                   and bool(bought) and bool(watchlist))
+    if buy_checked:
+        checks += 1
+        if bought not in watchlist:
+            violations += 1
+
     # 1. Language-risk mismatch — only meaningful when the profile commits to a
     #    direction. Moderate has no characteristic vocabulary to violate, so the
     #    check does not run and must not be counted in the denominator.
-    if risk_tolerance == "conservative":
+    if not reasoning:
+        pass
+    elif risk_tolerance == "conservative":
         checks += 1
         if any(w in reasoning_lower for w in _AGGRESSIVE_WORDS):
             violations += 1
@@ -266,7 +295,7 @@ def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
     #
     # Reasoning that names no symbol at all carries no evidence either way, so
     # the check does not run and is not counted in the denominator.
-    if watchlist:
+    if watchlist and reasoning and not buy_checked:
         watch_up = {s.upper() for s in watchlist}
         mentioned = {sym for sym in _ALL_KNOWN_SYMBOLS
                      if _mentions_symbol(reasoning_upper, sym)}
@@ -289,6 +318,19 @@ def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
     if checks == 0:
         return None
     return round(1.0 - violations / checks, 2)
+
+
+def hold_rate_drift(hold_rate: float, persona) -> bool:
+    """
+    True when a run's HOLD rate is out of character for the agent's profile.
+
+    Run-level, not per-decision: one HOLD is in character for anyone, holding
+    nearly all run is not for an aggressive trader. Only aggressive commits to
+    a direction here -- a moderate "high conviction only" agent (Alex Chen)
+    holding all run is following his own strategy.
+    """
+    tol = _normalise_risk_tolerance(getattr(persona.scratch, "risk_tolerance", None))
+    return tol == "aggressive" and hold_rate > AGGRESSIVE_MAX_HOLD_RATE
 
 
 # ---------------------------------------------------------------------------

@@ -88,6 +88,7 @@ from middleware.action_filtering    import (
 from middleware.persona_anchoring   import (
     score_persona_consistency,
     PERSONA_DRIFT_THRESHOLD,
+    hold_rate_drift,
 )
 from middleware.id_rag import (
     # id_rag_anchor is deliberately NOT imported here. The input-side steps are
@@ -1350,9 +1351,11 @@ class TradingReverie:
             print(f"  [{name}] *** STATE CONTRADICTION *** {grounding_flag}")
 
         # 8b. Persona consistency — did the LLM stay in character?
-        # None means "not scoreable" (no reasoning was produced at all), which
+        # Scored on the pre-filter request as well as the reasoning, so what
+        # the agent TRIED to buy counts even when the filter blocked it.
+        # None means "not scoreable" (no reasoning and no trade request), which
         # is distinct from "scored badly" and must not be averaged in as either.
-        drift_score = score_persona_consistency(reasoning, persona)
+        drift_score = score_persona_consistency(reasoning, persona, req)
         if drift_score is not None and drift_score <= PERSONA_DRIFT_THRESHOLD:
             print(f"  [{name}] *** PERSONA DRIFT *** consistency score "
                   f"{drift_score:.2f} (reasoning may contradict agent profile)")
@@ -1628,6 +1631,10 @@ class TradingReverie:
                 "avg_persona_consistency":      avg_drift,
                 "persona_drift_events":         drift_events,
                 "scored_decisions":             len(scores),
+                # Run-level: an aggressive agent holding most of the run. The
+                # per-decision score cannot see this; see hold_rate_drift().
+                "persona_hold_drift":           hold_rate_drift(
+                    abstention_rate / 100, self.personas[name]),
                 "memory_compression": {
                     "nodes_in":          ag["mc_nodes_in"],
                     "nodes_out":         ag["mc_nodes_out"],
@@ -1822,7 +1829,7 @@ class TradingReverie:
                                                   key=lambda kv: -kv[1]))
                 print(f"      validation errors: {reasons}")
             print(f"    Decisions w/ reasoning: {ag['reasoned_decisions']}  "
-                  f"(the only ones stale/drift can score)")
+                  f"(the only ones stale can score)")
             stale_pct = ag["stale_context_rate_pct"]
             stale_str = ("N/A (no reasoning produced)" if stale_pct is None
                          else f"{stale_pct}% of {ag['reasoned_decisions']} reasoned")
@@ -1858,7 +1865,9 @@ class TradingReverie:
                   f"analyze={dist.get('analyze',0)}")
             print(f"    Abstention     : {ag.get('abstention_rate_pct', 0)}% HOLD"
                   + ("" if ag.get("participated", True)
-                     else "   <- NON-PARTICIPANT: requested no trades all run"))
+                     else "   <- NON-PARTICIPANT: requested no trades all run")
+                  + ("   <- PERSONA DRIFT: aggressive profile, held most of the run"
+                     if ag.get("persona_hold_drift") else ""))
             print(f"    Portfolio PnL  : ${ag['pnl_usd']:+,.2f}  "
                   f"(${ag['start_portfolio_usd']:,.0f} -> ${ag['end_portfolio_usd']:,.0f})")
             print()

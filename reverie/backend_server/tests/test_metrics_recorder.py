@@ -23,6 +23,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -547,15 +548,17 @@ def report_stub(log):
     report's own logic, not the pipeline's.
 
     Agent names are taken from the log so the per-agent section is populated;
-    reading them from self.personas is the only reason this needs more than a
-    bare namespace.
+    The report reads names from self.personas, and each persona's risk
+    tolerance for the run-level hold-drift check.
     """
     class _Stub:
         use_middleware = True
         temperature = 0.7
         seed = 42
         sim_code = "unit_probe"
-        personas = {entry["agent"]: None for entry in log}
+        personas = {entry["agent"]: SimpleNamespace(
+            scratch=SimpleNamespace(risk_tolerance="moderate"))
+            for entry in log}
 
     return _Stub()
 
