@@ -299,11 +299,19 @@ def anchor_memory_context(persona, memory_context: str) -> str:
     """
     Prepend the persona anchor to an existing memory context string.
 
-    NOTE: make_trading_decision() calls id_rag.id_rag_anchor() instead, which
-    retrieves only the identity facts relevant to the current context rather
-    than prepending this full static block. This function is kept for callers
-    that want the unconditional anchor (input_stabilizer.py) -- it is no longer
-    on the main decision path, whatever this docstring used to claim.
+    LEGACY. NOT ON ANY CODE PATH, AND HAS NO CALLER AT ALL.
+
+    The pipeline calls id_rag.id_rag_anchor() instead, which retrieves only the
+    identity facts relevant to the current context rather than prepending this
+    full static block. This function's only caller was input_stabilizer.py,
+    which has been deleted: it was the original four-layer orchestrator, it
+    imported four classes that never existed, and it could not be imported.
+
+    Kept rather than deleted because the paper's capstone report describes a
+    "layer 3: persona anchoring", and this is that layer. It is worth being
+    able to point at what the description refers to. What is measured is
+    score_persona_consistency() further up, a post-hoc metric, so layer 3 is a
+    measurement and not an intervention. See middleware/README.md.
     """
     anchor = create_persona_anchor(persona)
     return anchor + memory_context
