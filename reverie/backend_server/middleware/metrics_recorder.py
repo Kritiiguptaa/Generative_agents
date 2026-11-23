@@ -196,7 +196,12 @@ class MetricsRecorder:
         self.events: List[Dict[str, object]] = []
         self.meta: Dict[str, object] = {"config_name": config_name}
         self._next_request_id = 0
-        self._known_requests = set()
+        # request_id -> (agent, step). Kept so a disposition event can be
+        # stamped with the agent its request belonged to. Dispositions are
+        # joined to requests by id, but per-agent metrics filter events by
+        # agent, and an unstamped disposition would be dropped by that filter
+        # and silently lower every per-agent count.
+        self._known_requests: Dict[int, tuple] = {}
         self._metrics: Dict[str, Callable] = {}
         self._register_default_metrics()
 
@@ -241,7 +246,7 @@ class MetricsRecorder:
         """
         request_id = self._next_request_id
         self._next_request_id += 1
-        self._known_requests.add(request_id)
+        self._known_requests[request_id] = (agent, step)
         self.events.append({
             "type": EVENT_REQUEST,
             "request_id": request_id,
@@ -290,9 +295,13 @@ class MetricsRecorder:
                 f"request as it arrived. Recording a disposition without one "
                 f"means the metric is reading the corrected decision, which is "
                 f"how two runs both reported 0 hallucinations.")
+        agent, step = self._known_requests[request_id]
         self.events.append({
             "type": EVENT_DISPOSITION,
             "request_id": request_id,
+            # Copied from the request so per-agent filtering keeps this event.
+            "agent": agent,
+            "step": step,
             "disposition": disposition,
             "kind": kind,
             "reason": reason,
@@ -398,6 +407,29 @@ class MetricsRecorder:
         result = {"meta": dict(self.meta)}
         for name, fn in self._metrics.items():
             result[name] = fn(self.events)
+        return result
+
+    def summary_by_agent(self) -> Dict[str, Dict[str, object]]:
+        """
+        The same metrics, computed per agent.
+
+        One definition per metric, applied to a filtered event list, rather
+        than a second set of per-agent counters. The report used to accumulate
+        totals and per-agent figures separately, which is how the headline rate
+        and the per-agent rates came to be divided by different denominators,
+        total against active, and stopped being comparable with each other.
+
+        Agents come from the recorded events, so an agent that never traded
+        still appears: a silently absent agent is how a non-participant stops
+        being visible, and the non-participant is the strongest version of the
+        abstention problem.
+        """
+        agents = sorted({e["agent"] for e in self.events if e.get("agent")})
+        result = {}
+        for agent in agents:
+            subset = [e for e in self.events if e.get("agent") == agent]
+            result[agent] = {name: fn(subset)
+                             for name, fn in self._metrics.items()}
         return result
 
     # -- output ------------------------------------------------------------
@@ -584,6 +616,72 @@ def recorder_from_trading_log(log: list, arm: str = "middleware",
             stale_context=bool(entry.get("stale_context")),
             state_contradiction=bool(entry.get("state_contradiction")),
             persona_score=entry.get("persona_drift_score"),
+        )
+    return recorder
+
+
+def recorder_from_pairs(pairs: list, arm: str,
+                        config_name: str = UNKNOWN) -> MetricsRecorder:
+    """
+    Build a recorder for one arm of the paired harness's pair list.
+
+    A second adapter rather than a second set of counters. The paired report
+    computed trade attempts, infeasible counts, the caught-versus-executed
+    split and the reasoned denominators with its own inline sums, duplicating
+    every definition in the independent report. The two then drifted: the
+    independent report gained abstention and a non-participant warning, and
+    this one never did, so two reports of the same run could not be compared on
+    the measure that decides whether a clean rate was earned or abstained into.
+
+    The pair entries are shaped differently from a trading log, with each arm
+    flat under its own key, which is why the mapping cannot simply be reused.
+    The metric definitions are what is shared.
+    """
+    from middleware.action_filtering import is_trade_request
+
+    recorder = MetricsRecorder(config_name=config_name)
+    for pair in pairs:
+        if not isinstance(pair, dict) or not isinstance(pair.get(arm), dict):
+            continue
+        side = pair[arm]
+        requested = side.get("requested") or {}
+        action = side.get("action")
+
+        # Same rule the paired report already used: fall back to the final
+        # action when the request carried no action of its own, because an
+        # unparseable response has no request to classify.
+        classify = requested if requested.get("action") else {"action": action}
+
+        request_id = recorder.record_request(
+            step=pair.get("step"),
+            agent=pair.get("agent"),
+            arm=arm,
+            action=action,
+            symbol=side.get("symbol"),
+            quantity=side.get("quantity"),
+            is_trade_request=bool(is_trade_request(classify)),
+        )
+
+        disposition = str(side.get("filter_status") or "success")
+        if disposition == "success":
+            disposition = DISPOSITION_ACCEPTED
+        recorder.record_disposition(
+            request_id,
+            disposition=disposition,
+            kind=str(side.get("kind") or ""),
+            infeasible=bool(side.get("infeasible")),
+            reached_execution=(
+                side.get("disposition") != "caught_pre_execution"),
+        )
+
+        recorder.record_context(
+            step=pair.get("step"),
+            agent=pair.get("agent"),
+            arm=arm,
+            context_chars=int(side.get("context_chars") or 0),
+            has_reasoning=bool(side.get("has_reasoning")),
+            stale_context=bool(side.get("stale_context")),
+            state_contradiction=bool(side.get("state_contradiction")),
         )
     return recorder
 

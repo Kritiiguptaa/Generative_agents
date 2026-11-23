@@ -731,6 +731,122 @@ class ReportMetadataAndErrorCountsTest(unittest.TestCase):
         self.assertEqual(report["total_server_errors"], 0)
 
 
+class PairedAdapterTest(unittest.TestCase):
+    """
+    The paired harness's figures now come from the recorder too.
+
+    The paired report has no golden file, so these pin the invariants that
+    would break if the adapter mapped a field wrongly. The strongest is the
+    disposition identity: every infeasible request was either caught before
+    execution or executed, never both and never neither.
+    """
+
+    @staticmethod
+    def _pair(agent="Alex Chen", step=0, action="buy", requested=None,
+              filter_status="success", infeasible=False, disposition="",
+              has_reasoning=True, context_chars=100):
+        """A pair entry shaped like PairedEvaluation writes them."""
+        side = {
+            "action": action,
+            "symbol": "NVDA",
+            "quantity": 1,
+            "requested": requested if requested is not None else {
+                "action": action, "symbol": "NVDA", "quantity": 1},
+            "filter_status": filter_status,
+            "infeasible": infeasible,
+            "kind": "illegal_request" if infeasible else "",
+            "disposition": disposition,
+            "has_reasoning": has_reasoning,
+            "context_chars": context_chars,
+            "stale_context": False,
+            "state_contradiction": False,
+        }
+        return {"step": step, "agent": agent, "middleware": dict(side),
+                "baseline": dict(side)}
+
+    def test_caught_plus_executed_equals_infeasible(self):
+        """
+        The disposition split must account for every infeasible request.
+
+        If it did not, the headline claim would be arithmetically unsound: a
+        request that was neither caught nor executed is unexplained, and one
+        counted as both inflates the comparison in both directions at once.
+        """
+        from middleware.metrics_recorder import recorder_from_pairs
+
+        pairs = [
+            self._pair(step=0, infeasible=True,
+                       disposition="caught_pre_execution",
+                       filter_status="fallback"),
+            self._pair(step=1, infeasible=True,
+                       disposition="executed_malformed"),
+            self._pair(step=2, infeasible=False),
+        ]
+        summary = recorder_from_pairs(pairs, "middleware").summary()
+        infeasible = summary["infeasible_requests"]["count"]
+        caught = summary["caught_pre_execution"]["count"]
+        executed = summary["executed_malformed"]["count"]
+        self.assertEqual(infeasible, 2)
+        self.assertEqual(caught + executed, infeasible)
+        self.assertEqual(caught, 1)
+        self.assertEqual(executed, 1)
+
+    def test_an_unparseable_response_is_classified_by_its_final_action(self):
+        """
+        A request with no action falls back to the final action.
+
+        This is the rule the paired report already used, and it matters because
+        an unparseable response carries no request to classify, so without the
+        fallback it would not count as a decision at all.
+        """
+        from middleware.metrics_recorder import recorder_from_pairs
+
+        pairs = [self._pair(action="hold", requested={},
+                            filter_status="fallback")]
+        summary = recorder_from_pairs(pairs, "middleware").summary()
+        # A HOLD is a decision but not a trade attempt.
+        self.assertEqual(summary["trade_attempts"]["count"], 0)
+        self.assertEqual(summary["abstention"]["denominator"], 1)
+
+    def test_a_non_participant_is_detected_per_arm(self):
+        """
+        Participation is computed per arm, since the arms differ.
+
+        The two arms make different requests from the same state, so an agent
+        can be a non-participant in one and not the other, and reporting one
+        arm's participation for both would hide it.
+        """
+        from middleware.metrics_recorder import recorder_from_pairs
+
+        pairs = [
+            self._pair(agent="Alex Chen", step=0, action="hold",
+                       requested={"action": "hold"}),
+            self._pair(agent="Marcus Webb", step=0, action="buy"),
+        ]
+        summary = recorder_from_pairs(pairs, "middleware").summary()
+        self.assertEqual(summary["participation"]["non_participants"],
+                         ["Alex Chen"])
+
+    def test_dispositions_carry_the_agent_for_per_agent_grouping(self):
+        """
+        A disposition event is stamped with its request's agent.
+
+        Per-agent metrics filter events by agent, so an unstamped disposition
+        would be dropped by that filter and silently lower every per-agent
+        count while the totals stayed right, which is the hardest kind of
+        discrepancy to notice.
+        """
+        from middleware.metrics_recorder import recorder_from_pairs
+
+        pairs = [self._pair(agent="Sara Kim", infeasible=True,
+                            disposition="caught_pre_execution")]
+        recorder = recorder_from_pairs(pairs, "middleware")
+        by_agent = recorder.summary_by_agent()
+        self.assertIn("Sara Kim", by_agent)
+        self.assertEqual(
+            by_agent["Sara Kim"]["caught_pre_execution"]["count"], 1)
+
+
 class PrintedReportStabilityTest(unittest.TestCase):
     """
     The printed report's existing labels must not move.

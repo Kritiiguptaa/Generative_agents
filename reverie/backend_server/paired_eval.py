@@ -68,7 +68,11 @@ from trading_reverie import (
 # different pipeline from the runner's.
 from middleware.action_filtering import is_trade_request
 from middleware.middleware_wrapper import MiddlewareWrapper
-from middleware.metrics_recorder import collect_run_metadata, format_meta_lines
+from middleware.metrics_recorder import (
+    collect_run_metadata,
+    format_meta_lines,
+    recorder_from_pairs,
+)
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.prompt_template.gpt_structure import ollama_request
 from market_perceive import market_perceive, record_trade_fill, record_order_feedback
@@ -327,37 +331,27 @@ class PairedEvaluation(TradingReverie):
             "per_agent": {},
         }
         for arm in ("middleware", "baseline"):
-            # Same denominator definition the independent report uses -- see
-            # is_trade_request(). An invalid verb is a trade request; a null
-            # action (unparseable) is not.
-            attempts = sum(
-                1 for p in self.pairs
-                if is_trade_request(
-                    p[arm]["requested"]
-                    if p[arm]["requested"].get("action")
-                    else {"action": p[arm]["action"]}))
-            infeasible = sum(1 for p in self.pairs if p[arm]["infeasible"])
-            caught = sum(1 for p in self.pairs
-                         if p[arm]["disposition"] == "caught_pre_execution")
-            executed = sum(1 for p in self.pairs
-                           if p[arm]["disposition"] == "executed_malformed")
-            reasoned = sum(1 for p in self.pairs if p[arm]["has_reasoning"])
-            stale = sum(1 for p in self.pairs if p[arm]["stale_context"])
-            contra = sum(1 for p in self.pairs if p[arm]["state_contradiction"])
-            # Abstention and participation. The independent report gained these
-            # and this one never did, which is the concrete cost of having had
-            # two copies of the report code: an arm can buy a clean rate by
-            # declining to trade, and run 06's middleware arm reported 0.0% of
-            # 21 attempts with one agent requesting no trades at all, yet the
-            # paired report had no way to show it.
-            holds = sum(1 for p in self.pairs
-                        if str(p[arm]["action"] or "").lower() == "hold")
-            traders = {a for a in agents
-                       if any(p["agent"] == a and is_trade_request(
-                           p[arm]["requested"]
-                           if p[arm]["requested"].get("action")
-                           else {"action": p[arm]["action"]})
-                           for p in self.pairs)}
+            # Every figure below comes from MetricsRecorder, which holds one
+            # definition of each metric. These were previously inline sums here
+            # AND in trading_reverie's report, and the two copies drifted: that
+            # report gained abstention and a non-participant warning while this
+            # one never did, so two reports of the same run could not be
+            # compared on the measure that decides whether a clean rate was
+            # earned or merely abstained into.
+            metrics = recorder_from_pairs(self.pairs, arm,
+                                          config_name=self.sim_code)
+            arm_summary = metrics.summary()
+
+            attempts = arm_summary["trade_attempts"]["count"]
+            infeasible = arm_summary["infeasible_requests"]["count"]
+            caught = arm_summary["caught_pre_execution"]["count"]
+            executed = arm_summary["executed_malformed"]["count"]
+            reasoned = arm_summary["stale_context_hits"]["denominator"]
+            stale = arm_summary["stale_context_hits"]["count"]
+            contra = arm_summary["state_contradictions"]["count"]
+            holds = arm_summary["abstention"]["count"]
+            traders = set(agents) - set(
+                arm_summary["participation"]["non_participants"])
             per_agent_eps = 0
             for a in agents:
                 reqs = [(p["step"], (p[arm]["requested"].get("action"),

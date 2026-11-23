@@ -105,6 +105,7 @@ from middleware.middleware_wrapper import (
 from middleware.metrics_recorder import (
     collect_run_metadata,
     format_meta_lines,
+    recorder_from_trading_log,
 )
 
 from persona.cognitive_modules.retrieve import new_retrieve
@@ -1140,6 +1141,25 @@ class TradingReverie:
             json.dump(report, f, indent=2)
         self._print_report(report)
 
+        # Recorder artefacts, written alongside the existing report rather than
+        # instead of it. hallucination_report.json keeps its shape because the
+        # frontend and the Run 06 analysis scripts read it; these two files are
+        # additive.
+        #
+        # metrics_events.jsonl is one event per line, so a run killed mid-write
+        # loses one line rather than the file, and metrics_summary.json is
+        # written to a temporary file and renamed, so a disk-full cannot leave
+        # a truncated summary that still parses. Run 07 died on ENOSPC while
+        # the client reported 99 GB free.
+        recorder = recorder_from_trading_log(
+            log,
+            arm="middleware" if self.use_middleware else "baseline",
+            config_name=self.sim_code,
+        )
+        recorder.record_meta(**(report.get("run_metadata") or {}))
+        recorder.write_events(str(sim_path / "reverie" / "metrics_events.jsonl"))
+        recorder.write_summary(str(sim_path / "reverie" / "metrics_summary.json"))
+
         # Run is done -- flip the live flag off so frontend pollers stop.
         last_step = log[-1]["step"] if log else self.market.step
         self._write_run_status(last_step, running=False)
@@ -1590,10 +1610,27 @@ class TradingReverie:
             }
             total_hallucinations += ag["action_hallucinations"]
 
-        total_decisions = sum(a["total_decisions"] for a in per_agent.values())
-        total_attempts  = sum(a["trade_attempts"]  for a in per_agent.values())
-        total_caught    = sum(a["caught_pre_execution"] for a in per_agent.values())
-        total_executed  = sum(a["executed_malformed"]   for a in per_agent.values())
+        # The cross-arm totals come from MetricsRecorder, which holds one
+        # definition of each. These same quantities are also computed by
+        # paired_eval's report, and two copies of a metric definition are how
+        # the two reports came to disagree: this one gained abstention and a
+        # non-participant warning and the paired one never did.
+        #
+        # The recorder is built from the log that was just produced, and the
+        # equivalence is asserted on real runs of both arms in
+        # tests/test_metrics_recorder.py, so this reads the same numbers the
+        # inline sums produced. The per-agent breakdown below stays inline: it
+        # exists only here, so it is not duplication.
+        metrics = recorder_from_trading_log(
+            log,
+            arm="middleware" if self.use_middleware else "baseline",
+            config_name=self.sim_code,
+        ).summary()
+
+        total_decisions = metrics["abstention"]["denominator"]
+        total_attempts  = metrics["trade_attempts"]["count"]
+        total_caught    = metrics["caught_pre_execution"]["count"]
+        total_executed  = metrics["executed_malformed"]["count"]
         total_episodes  = sum(s["hallucination_episodes"] for s in summary.values())
         total_contra    = sum(a["state_contradictions"] for a in per_agent.values())
         total_reasoned  = sum(a["reasoned_decisions"]   for a in per_agent.values())
