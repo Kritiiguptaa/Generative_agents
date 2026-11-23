@@ -536,5 +536,310 @@ class ReportEquivalenceTest(unittest.TestCase):
         self.assertGreater(base_report["total_executed_malformed"], 0)
 
 
+def report_stub(log):
+    """
+    A stand-in carrying only the attributes _generate_report reads.
+
+    Used instead of a real simulation because the function reads four
+    attributes plus the agent names, and booting a 20-step run per assertion
+    would be slow without adding coverage. The equivalence tests above already
+    exercise _generate_report against real runs, so what is tested here is the
+    report's own logic, not the pipeline's.
+
+    Agent names are taken from the log so the per-agent section is populated;
+    reading them from self.personas is the only reason this needs more than a
+    bare namespace.
+    """
+    class _Stub:
+        use_middleware = True
+        temperature = 0.7
+        seed = 42
+        sim_code = "unit_probe"
+        personas = {entry["agent"]: None for entry in log}
+
+    return _Stub()
+
+
+class ServerErrorSeparationInReportTest(unittest.TestCase):
+    """
+    WP2: a dead server must not be recorded as the model failing.
+
+    gpt_structure returns the string "OLLAMA ERROR" when the server could not
+    be reached, timed out, or answered with an HTTP error. That string is not
+    valid JSON, so it reached the validator and was recorded as "response was
+    not valid JSON", i.e. as the model's failure, and inflated the
+    parser-fallback rate. Run 06 happened to see zero of these across all 16
+    configs, which is why its figures are unaffected by the split.
+    """
+
+    def test_the_sentinel_is_recognised_before_json_parsing(self):
+        """
+        The parser must classify the sentinel, not try to parse it.
+
+        Order matters here: attempting the parse first produces a JSONDecodeError
+        and the wrong error reason, which is the whole bug.
+        """
+        from middleware.action_filtering import (
+            SERVER_ERROR_REASON, _parse_json_response)
+        response, error = _parse_json_response("OLLAMA ERROR")
+        self.assertIsNone(response)
+        self.assertEqual(error, SERVER_ERROR_REASON)
+
+    def test_genuine_bad_json_is_still_a_parse_failure(self):
+        """
+        Malformed model output must keep its own reason.
+
+        If this also became a server error the split would be useless in the
+        other direction, hiding the model failures the metric exists to count.
+        """
+        from middleware.action_filtering import _parse_json_response
+        response, error = _parse_json_response('{"action": "buy"')
+        self.assertIsNone(response)
+        self.assertEqual(error, "response was not valid JSON")
+
+    def test_is_server_error_distinguishes_the_two(self):
+        """The helper must separate infrastructure from measurement."""
+        from middleware.action_filtering import (
+            SERVER_ERROR_REASON, is_server_error)
+        self.assertTrue(is_server_error(SERVER_ERROR_REASON))
+        self.assertFalse(is_server_error("response was not valid JSON"))
+        self.assertFalse(is_server_error("quantity outside legal limit"))
+        self.assertFalse(is_server_error(None))
+
+    def test_a_server_error_is_not_a_hallucination(self):
+        """
+        An unreachable server must not be counted as an illegal action.
+
+        Otherwise an outage would raise the hallucination rate, which is the
+        number the paper's claim is about.
+        """
+        from middleware.action_filtering import (
+            SERVER_ERROR_REASON, is_illegal_action_error)
+        self.assertFalse(is_illegal_action_error(SERVER_ERROR_REASON))
+
+
+class ReportMetadataAndErrorCountsTest(unittest.TestCase):
+    """
+    WP1 and WP2 as the report sees them.
+
+    _generate_report is called on a stand-in object rather than a real
+    simulation, because it reads only four attributes and a 20-step run per
+    assertion would be slow for no extra coverage. The equivalence tests above
+    already exercise it against real runs.
+    """
+
+    @staticmethod
+    def _entry(agent="Alex Chen", step=0, action="hold", filter_status="success",
+               error_reason="", requested=None, hallucination=False):
+        """A trading_log-shaped entry with the fields the report reads."""
+        return {
+            "step": step,
+            "agent": agent,
+            "decision": {"action": action, "symbol": None, "quantity": 0,
+                         "reasoning": "because"},
+            "requested": requested if requested is not None else {},
+            "filter_status": filter_status,
+            "error_reason": error_reason,
+            "outcome": "",
+            "hallucination": hallucination,
+            "halluc_kind": "",
+            "halluc_disposition": "",
+            "illegal_request": False,
+            "order_feedback": "",
+            "requested_quantity": 0,
+            "filled_quantity": 0,
+            "filtered": False,
+            "has_reasoning": True,
+            "stale_context": False,
+            "state_contradiction": False,
+            "persona_drift_score": 1.0,
+            "compression": {"chars_out": 10, "chars_in": 10, "nodes_in": 1,
+                            "nodes_out": 1, "dropped_duplicate": 0,
+                            "dropped_stale": 0, "dropped_budget": 0,
+                            "annotated_stale": 0, "enabled": True},
+            "cash": 1000.0,
+            "portfolio_value": 1000.0,
+            "portfolio_value_before": 1000.0,
+            "positions": {},
+            "market_prices": {},
+        }
+
+    def _report(self, log):
+        """Generate a report from a log without booting a simulation."""
+        from trading_reverie import TradingReverie
+        return TradingReverie._generate_report(
+            report_stub(log), log, n_steps=len(log))
+
+    def test_the_report_records_what_produced_it(self):
+        """
+        WP1: model, temperature, seed, steps, config and commit are recorded.
+
+        Without these, Run 06 and Run 07 produce indistinguishable artefacts
+        while differing in the sampling settings that make their absolute rates
+        incomparable.
+        """
+        report = self._report([self._entry()])
+        meta = report["run_metadata"]
+        self.assertEqual(meta["temperature"], 0.7)
+        self.assertEqual(meta["seed"], 42)
+        self.assertEqual(meta["steps"], 1)
+        self.assertEqual(meta["config_name"], "unit_probe")
+        self.assertIn("model", meta)
+        self.assertIn("git_commit", meta)
+        self.assertIn("git_dirty", meta)
+
+    def test_a_server_error_is_counted_apart_from_parser_fallbacks(self):
+        """
+        WP2 at the report level: the outage gets its own total.
+
+        One fallback caused by the server and one caused by bad JSON must give
+        one server error and one parser fallback, not two parser fallbacks.
+        """
+        from middleware.action_filtering import SERVER_ERROR_REASON
+
+        log = [
+            self._entry(step=0, filter_status="fallback",
+                        error_reason=SERVER_ERROR_REASON),
+            self._entry(step=1, filter_status="fallback",
+                        error_reason="response was not valid JSON"),
+        ]
+        report = self._report(log)
+        self.assertEqual(report["total_server_errors"], 1)
+        fallbacks = sum(a["fallback_decisions"]
+                        for a in report["per_agent"].values())
+        self.assertEqual(fallbacks, 1,
+                         "the server failure was counted as the model's")
+
+    def test_server_errors_still_appear_in_the_reason_breakdown(self):
+        """
+        The outage is excluded from the fallback count but still diagnosable.
+
+        Dropping it entirely would make a run with a flaky server look clean,
+        which is the opposite failure.
+        """
+        from middleware.action_filtering import SERVER_ERROR_REASON
+        report = self._report([self._entry(filter_status="fallback",
+                                           error_reason=SERVER_ERROR_REASON)])
+        reasons = {}
+        for agent in report["per_agent"].values():
+            reasons.update(agent.get("error_reasons") or {})
+        self.assertIn(SERVER_ERROR_REASON, reasons)
+
+    def test_a_clean_run_reports_no_server_errors(self):
+        """A run with a healthy server must report zero, not omit the field."""
+        report = self._report([self._entry()])
+        self.assertEqual(report["total_server_errors"], 0)
+
+
+class PrintedReportStabilityTest(unittest.TestCase):
+    """
+    The printed report's existing labels must not move.
+
+    WP-B's acceptance requires that the Run 06 log parser keeps working on new
+    logs. That parser matches on these labels, so the metadata is appended
+    beneath them rather than interleaved, and none is renamed or reordered.
+
+    This cannot be verified against the real parse_run06.py, which lives in
+    agent_anchor_ijcis_source.zip and is not in this repository. The labels and
+    their order are pinned here instead, which is the part that would break it.
+    """
+
+    EXPECTED_ORDER = (
+        "HALLUCINATION REPORT",
+        "Middleware      :",
+        "Steps simulated :",
+        "Total decisions :",
+    )
+
+    def test_existing_labels_keep_their_order(self):
+        """
+        The header labels appear in the original order.
+
+        The metadata lines sit between "Steps simulated" and "Total decisions",
+        so this also pins that inserting them did not separate a label from the
+        value a line-oriented parser expects next to it.
+        """
+        import io
+        import contextlib
+        from trading_reverie import TradingReverie
+
+        entry = ReportMetadataAndErrorCountsTest._entry()
+        stub = report_stub([entry])
+
+        report = TradingReverie._generate_report(stub, [entry], n_steps=1)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            TradingReverie._print_report(stub, report)
+        output = buffer.getvalue()
+
+        positions = []
+        for label in self.EXPECTED_ORDER:
+            index = output.find(label)
+            self.assertNotEqual(index, -1, f"label {label!r} disappeared")
+            positions.append(index)
+        self.assertEqual(positions, sorted(positions),
+                         "the existing report labels were reordered")
+
+    def test_the_metadata_block_is_printed(self):
+        """The new lines are actually emitted, not merely stored in the JSON."""
+        from middleware.metrics_recorder import format_meta_lines
+        lines = format_meta_lines({
+            "model": "mistral", "temperature": 0.7, "seed": 42,
+            "config_name": "run07_mw_s42", "git_commit": "abc1234",
+            "git_dirty": False, "ollama_version": "0.30.11",
+        })
+        rendered = "\n".join(lines)
+        self.assertIn("Model", rendered)
+        self.assertIn("mistral", rendered)
+        self.assertIn("Temperature", rendered)
+        self.assertIn("Commit", rendered)
+        # A boolean reads as yes/no rather than Python's True/False, since this
+        # is printed for a human alongside the other report lines.
+        self.assertIn("Tree dirty      : no", rendered)
+
+    def test_a_skipped_field_is_not_printed_twice(self):
+        """
+        The paired report must not emit two lines with the same label.
+
+        It prints its own "Seed" line, so the metadata block skips seed. Two
+        identical labels would leave a line-oriented parser with two
+        candidates for one field.
+        """
+        from middleware.metrics_recorder import format_meta_lines
+        meta = {"model": "mistral", "seed": 42, "git_commit": "abc1234"}
+        rendered = "\n".join(format_meta_lines(meta,
+                                               skip=frozenset({"seed"})))
+        self.assertNotIn("Seed", rendered)
+        self.assertIn("Model", rendered)
+        self.assertIn("Commit", rendered)
+
+    def test_the_paired_report_prints_seed_exactly_once(self):
+        """
+        End to end on the real formatter plus the paired report's own header.
+
+        Checks the thing that actually matters, the rendered output, rather
+        than only the skip argument.
+        """
+        from middleware.metrics_recorder import format_meta_lines
+        header = ["Seed            : 42", "Advanced with   : middleware"]
+        meta_lines = format_meta_lines(
+            {"model": "mistral", "seed": 42, "temperature": 0.7},
+            skip=frozenset({"seed"}))
+        output = "\n".join(header + meta_lines)
+        self.assertEqual(output.count("Seed "), 1)
+
+    def test_missing_metadata_is_skipped_not_printed_as_none(self):
+        """
+        An absent field is omitted rather than printed as None.
+
+        A line reading "Commit          : None" looks like a recorded value of
+        None, which is worse than no line at all.
+        """
+        from middleware.metrics_recorder import format_meta_lines
+        rendered = "\n".join(format_meta_lines({"model": "mistral"}))
+        self.assertIn("Model", rendered)
+        self.assertNotIn("Commit", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

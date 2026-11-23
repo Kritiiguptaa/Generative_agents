@@ -84,6 +84,15 @@ ERROR_PARSE = "parse_failure"
 UNKNOWN = "NOT FOUND"
 
 
+# Caches for the two expensive lookups. Both describe the process, not the
+# run: the checkout cannot change under a running simulation, and the server
+# version will not either. Without this, every report generation paid two git
+# subprocesses and an HTTP timeout, which took the test suite from 10 seconds
+# to 72 because an unreachable server costs the full timeout each time.
+_git_cache: Dict[str, object] = {}
+_ollama_version_cache: Dict[str, str] = {}
+
+
 def git_commit_info(repo_dir: Optional[str] = None) -> Dict[str, object]:
     """
     Short commit hash of the working tree, plus whether it has local edits.
@@ -100,6 +109,8 @@ def git_commit_info(repo_dir: Optional[str] = None) -> Dict[str, object]:
     repository, rather than inventing a value.
     """
     cwd = repo_dir or os.path.dirname(os.path.abspath(__file__))
+    if cwd in _git_cache:
+        return dict(_git_cache[cwd])
 
     def _git(*args):
         """Run one git command, returning None on any failure."""
@@ -119,14 +130,16 @@ def git_commit_info(repo_dir: Optional[str] = None) -> Dict[str, object]:
 
     commit = _git("rev-parse", "--short", "HEAD")
     if commit is None:
-        return {"git_commit": UNKNOWN, "git_dirty": UNKNOWN}
-
-    status = _git("status", "--porcelain")
-    return {
-        "git_commit": commit,
-        # None means the status call failed, which is not the same as clean.
-        "git_dirty": UNKNOWN if status is None else bool(status.strip()),
-    }
+        info = {"git_commit": UNKNOWN, "git_dirty": UNKNOWN}
+    else:
+        status = _git("status", "--porcelain")
+        info = {
+            "git_commit": commit,
+            # None means the status call failed, which is not the same as clean.
+            "git_dirty": UNKNOWN if status is None else bool(status.strip()),
+        }
+    _git_cache[cwd] = dict(info)
+    return info
 
 
 def ollama_version(base_url: Optional[str] = None) -> str:
@@ -137,14 +150,31 @@ def ollama_version(base_url: Optional[str] = None) -> str:
     generated, and in the stubbed test harness it never is, so an unreachable
     server must produce UNKNOWN rather than an exception or a wrong value.
     """
+    key = base_url or ""
+    if key in _ollama_version_cache:
+        return _ollama_version_cache[key]
     try:
         import requests
         from middleware.id_rag import _cfg
         url = (base_url or _cfg(None, "ollama_base_url")) + "/api/version"
         data = requests.get(url, timeout=5).json()
-        return str(data.get("version") or UNKNOWN)
+        version = str(data.get("version") or UNKNOWN)
     except Exception:
-        return UNKNOWN
+        version = UNKNOWN
+    _ollama_version_cache[key] = version
+    return version
+
+
+def reset_metadata_caches() -> None:
+    """
+    Forget the cached commit and server version.
+
+    For tests that need a fresh lookup. Not called in normal operation: within
+    one run neither value can change, and re-reading them per report is what
+    made the suite eight times slower.
+    """
+    _git_cache.clear()
+    _ollama_version_cache.clear()
 
 
 class MetricsRecorder:
@@ -394,6 +424,95 @@ class MetricsRecorder:
         kind of artefact that reaches a paper.
         """
         _atomic_write(path, json.dumps(self.summary(), indent=2, sort_keys=True))
+
+
+def collect_run_metadata(model: object = None,
+                         temperature: object = None,
+                         seed: object = None,
+                         steps: object = None,
+                         config_name: object = None,
+                         include_ollama_version: bool = True) -> Dict[str, object]:
+    """
+    Everything needed to say what produced a report.
+
+    A report currently records none of this. Run 06 and Run 07 differ by their
+    sampling settings, temperature 0 against 0.7, and those settings appear
+    nowhere in the artefacts, so two reports can be indistinguishable while
+    describing runs whose absolute rates are not comparable.
+
+    The model is read from the live configuration rather than assumed, because
+    OLLAMA_CHAT_MODEL is an environment variable and a sweep that changed it
+    would otherwise produce reports claiming the default.
+
+    Anything that cannot be determined is UNKNOWN. Never a plausible default: a
+    wrongly recorded temperature would misattribute a whole sweep, and that is
+    worse than an obviously missing one.
+    """
+    if model is None:
+        try:
+            from persona.prompt_template.gpt_structure import OLLAMA_CHAT_MODEL
+            model = OLLAMA_CHAT_MODEL
+        except Exception:
+            model = UNKNOWN
+
+    meta = {
+        "model": model if model is not None else UNKNOWN,
+        "temperature": temperature if temperature is not None else UNKNOWN,
+        "seed": seed if seed is not None else UNKNOWN,
+        "steps": steps if steps is not None else UNKNOWN,
+        "config_name": config_name if config_name is not None else UNKNOWN,
+    }
+    meta.update(git_commit_info())
+    # Skippable because it is an HTTP call: in the stubbed test harness there is
+    # no server, and paying a timeout per report for a guaranteed UNKNOWN is
+    # waste.
+    meta["ollama_version"] = (ollama_version() if include_ollama_version
+                              else UNKNOWN)
+    return meta
+
+
+# Fixed field width, so the metadata block lines up with the existing report
+# lines ("Middleware      : ...", "Steps simulated : ..."). The existing labels
+# are not renamed, reordered or reformatted; these are appended beneath them,
+# because the Run 06 log parser matches on those labels.
+_META_LABEL_WIDTH = 16
+
+_META_LINE_ORDER = (
+    ("model", "Model"),
+    ("temperature", "Temperature"),
+    ("seed", "Seed"),
+    ("config_name", "Config"),
+    ("git_commit", "Commit"),
+    ("git_dirty", "Tree dirty"),
+    ("ollama_version", "Ollama"),
+)
+
+
+def format_meta_lines(meta: Dict[str, object],
+                      skip: Optional[frozenset] = None) -> List[str]:
+    """
+    Render the metadata as report lines, in a fixed order.
+
+    Shared by both harnesses so their reports cannot describe the same run
+    differently, which is how the independent report came to carry abstention
+    while the paired one never did.
+
+    `skip` drops fields the surrounding report already prints. The paired
+    report prints its own "Seed" line, and emitting a second line with the
+    identical label would leave a line-oriented parser with two candidates for
+    one field. "Steps" is always omitted for the same reason: both reports
+    already print a step count under their own label.
+    """
+    skip = skip or frozenset()
+    lines = []
+    for key, label in _META_LINE_ORDER:
+        if key not in meta or key in skip:
+            continue
+        value = meta[key]
+        if isinstance(value, bool):
+            value = "yes" if value else "no"
+        lines.append(f"{label:<{_META_LABEL_WIDTH}}: {value}")
+    return lines
 
 
 def recorder_from_trading_log(log: list, arm: str = "middleware",

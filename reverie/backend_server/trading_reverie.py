@@ -77,6 +77,7 @@ from middleware.action_filtering    import (
     # the baseline arm's free_form_decision() and by the executor, which are
     # not pipeline composition.
     log_action,
+    is_server_error,
     _parse_json_response,
     _split_combined_action,
     _market_is_open,
@@ -100,6 +101,10 @@ from middleware.id_rag import (
 from middleware.middleware_wrapper import (
     MiddlewareWrapper,
     raw_memory_context,
+)
+from middleware.metrics_recorder import (
+    collect_run_metadata,
+    format_meta_lines,
 )
 
 from persona.cognitive_modules.retrieve import new_retrieve
@@ -1423,10 +1428,20 @@ class TradingReverie:
             if is_trade_request(requested):
                 ag["trade_attempts"] += 1
 
-            if entry.get("filter_status") == "fallback":
+            # A server failure is not a parser fallback. The sentinel a dead
+            # server returns is not valid JSON, so it reached the validator and
+            # was recorded as the model failing to produce JSON; counting it
+            # here would attribute an outage to the model. It is reported under
+            # its own total instead. Run 06 saw 0 of these, so its fallback
+            # figures are unchanged.
+            server_failed = is_server_error(entry.get("error_reason"))
+
+            if entry.get("filter_status") == "fallback" and not server_failed:
                 ag["fallback_decisions"] += 1
 
             if entry.get("filter_status") in ("retry", "fallback"):
+                # Still tallied by reason, so a run with a flaky server can be
+                # diagnosed from the breakdown rather than looking clean.
                 ag["error_reasons"][entry.get("error_reason") or "unspecified"] += 1
 
             if entry.get("has_reasoning"):
@@ -1585,9 +1600,27 @@ class TradingReverie:
         total_holds     = sum(a["action_counts"].get("hold", 0)
                               for a in per_agent.values())
         participating   = sum(1 for a in per_agent.values() if a["trade_attempts"])
+        # Server failures, counted apart from the model's parse failures. A
+        # dead server returns a sentinel that is not valid JSON, so without
+        # this split it was recorded as the model failing to produce JSON and
+        # inflated the parser-fallback rate. Run 06 was clean (0 OLLAMA ERROR
+        # in all 16 configs), so its figures are unchanged by the distinction.
+        total_server_errors = sum(
+            1 for e in log if is_server_error(e.get("error_reason")))
+
         return {
             "middleware_enabled":          self.use_middleware,
             "simulation_steps":            n_steps,
+            # What produced this report. Previously absent, which meant two
+            # runs differing only in sampling settings produced
+            # indistinguishable artefacts.
+            "run_metadata":                collect_run_metadata(
+                temperature=self.temperature,
+                seed=self.seed,
+                steps=n_steps,
+                config_name=self.sim_code,
+            ),
+            "total_server_errors":         total_server_errors,
             "total_log_entries":           len(log),
             "total_decisions":             total_decisions,
             "total_trade_attempts":        total_attempts,
@@ -1627,7 +1660,19 @@ class TradingReverie:
         print(f"Middleware      : "
               f"{'ENABLED' if report.get('middleware_enabled') else 'DISABLED (baseline)'}")
         print(f"Steps simulated : {report['simulation_steps']}")
+        # Appended beneath the existing header lines, never interleaved with
+        # them and never renaming one: the Run 06 log parser matches on those
+        # labels and must keep working on new logs.
+        for line in format_meta_lines(report.get("run_metadata") or {}):
+            print(line)
         print(f"Total decisions : {report['total_log_entries']}")
+        # Printed next to the decision count rather than among the
+        # hallucination figures, because a server error is not a model failure
+        # and should not be read as one.
+        if report.get("total_server_errors"):
+            print(f"Server errors   : {report['total_server_errors']}  "
+                  f"(infrastructure, NOT counted as hallucinations or "
+                  f"parser fallbacks)")
         overall = report["overall_hallucination_rate_pct"]
         if overall is None:
             print(f"Total hallucinations : {report['total_hallucinations']}  "

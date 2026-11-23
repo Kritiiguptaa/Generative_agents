@@ -1735,6 +1735,12 @@
         "trade_attempts": 13
       }
     },
+    "run_metadata": {
+      "model": "mistral",
+      "seed": 42,
+      "steps": 20,
+      "temperature": 0.7
+    },
     "simulation_steps": 20,
     "total_abstention_rate_pct": 50.0,
     "total_agents": 3,
@@ -1744,6 +1750,7 @@
     "total_hallucination_episodes": 26,
     "total_hallucinations": 26,
     "total_log_entries": 60,
+    "total_server_errors": 0,
     "total_state_contradictions": 0,
     "total_trade_attempts": 37
   },

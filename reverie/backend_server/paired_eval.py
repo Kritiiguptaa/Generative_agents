@@ -68,6 +68,7 @@ from trading_reverie import (
 # different pipeline from the runner's.
 from middleware.action_filtering import is_trade_request
 from middleware.middleware_wrapper import MiddlewareWrapper
+from middleware.metrics_recorder import collect_run_metadata, format_meta_lines
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.prompt_template.gpt_structure import ollama_request
 from market_perceive import market_perceive, record_trade_fill, record_order_feedback
@@ -314,6 +315,15 @@ class PairedEvaluation(TradingReverie):
             "seed": self.seed,
             "simulation_steps": n_steps,
             "total_pairs": len(self.pairs),
+            # Same metadata block the independent report carries, from the same
+            # function. This report previously recorded only the seed, so it
+            # could not say which model or temperature produced it.
+            "run_metadata": collect_run_metadata(
+                temperature=self.temperature,
+                seed=self.seed,
+                steps=n_steps,
+                config_name=self.sim_code,
+            ),
             "per_agent": {},
         }
         for arm in ("middleware", "baseline"):
@@ -334,6 +344,20 @@ class PairedEvaluation(TradingReverie):
             reasoned = sum(1 for p in self.pairs if p[arm]["has_reasoning"])
             stale = sum(1 for p in self.pairs if p[arm]["stale_context"])
             contra = sum(1 for p in self.pairs if p[arm]["state_contradiction"])
+            # Abstention and participation. The independent report gained these
+            # and this one never did, which is the concrete cost of having had
+            # two copies of the report code: an arm can buy a clean rate by
+            # declining to trade, and run 06's middleware arm reported 0.0% of
+            # 21 attempts with one agent requesting no trades at all, yet the
+            # paired report had no way to show it.
+            holds = sum(1 for p in self.pairs
+                        if str(p[arm]["action"] or "").lower() == "hold")
+            traders = {a for a in agents
+                       if any(p["agent"] == a and is_trade_request(
+                           p[arm]["requested"]
+                           if p[arm]["requested"].get("action")
+                           else {"action": p[arm]["action"]})
+                           for p in self.pairs)}
             per_agent_eps = 0
             for a in agents:
                 reqs = [(p["step"], (p[arm]["requested"].get("action"),
@@ -352,6 +376,14 @@ class PairedEvaluation(TradingReverie):
                                      if attempts else None),
                 "caught_pre_execution": caught,
                 "executed_malformed": executed,
+                # Reported beside every rate, never on its own: a 0% rate from
+                # an arm that mostly held is not the same result as a 0% rate
+                # from an arm that traded.
+                "abstention_rate_pct": (round(holds / len(self.pairs) * 100, 1)
+                                        if self.pairs else None),
+                "participating_agents": len(traders),
+                "total_agents": len(agents),
+                "non_participants": sorted(set(agents) - traders),
                 "reasoned_decisions": reasoned,
                 "stale_context_hits": stale,
                 "stale_rate_pct": (round(stale / reasoned * 100, 1)
@@ -394,6 +426,15 @@ class PairedEvaluation(TradingReverie):
         print(f"Seed            : {report['seed']}")
         print(f"Advanced with   : {report['advanced_with']}")
         print(f"Matched pairs   : {report['total_pairs']}")
+        # Appended beneath the existing labels, from the same formatter the
+        # independent report uses, so the two cannot describe a run
+        # differently.
+        # "seed" is skipped: this report prints its own Seed line three lines
+        # up, and two lines with the same label would give a line-oriented
+        # parser two candidates for one field.
+        for line in format_meta_lines(report.get("run_metadata") or {},
+                                      skip=frozenset({"seed"})):
+            print(line)
         print()
         hdr = f"{'':<28}{'middleware':>14}{'baseline':>14}"
         print(hdr)
@@ -405,6 +446,11 @@ class PairedEvaluation(TradingReverie):
             ("distinct episodes", "episodes"),
             ("caught pre-execution", "caught_pre_execution"),
             ("EXECUTED malformed", "executed_malformed"),
+            # Appended after the existing rows, so a parser matching the old
+            # ones is unaffected. Printed next to the rates because a clean
+            # rate from an abstaining arm is not a clean result.
+            ("abstention %", "abstention_rate_pct"),
+            ("participating agents", "participating_agents"),
             ("stale context hits", "stale_context_hits"),
             ("state contradictions", "state_contradictions"),
             ("avg context chars", "avg_context_chars"),

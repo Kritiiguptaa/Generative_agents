@@ -270,19 +270,33 @@ class _FakeOllama:
 # Running the pipeline and reducing it to a comparable snapshot
 # ---------------------------------------------------------------------------
 
+# Report fields that legitimately differ between runs and checkouts, and so
+# must not be compared. The run_metadata block is the important case: it exists
+# precisely so a report says which commit and which server produced it, which
+# means it changes on EVERY commit. Pinning it would make this harness fail
+# after each commit for no behavioural reason, and a test that cries wolf gets
+# ignored or deleted. That the block is present and correctly populated is
+# asserted in test_metrics_recorder.py instead.
+_VOLATILE_KEYS = frozenset({
+    "timestamp", "time", "curr_time", "path", "sim_folder", "log_path",
+    "git_commit", "git_dirty", "ollama_version",
+    # Names the throwaway simulation folder, which differs per harness.
+    "config_name",
+})
+
+
 def _scrub(value):
     """
     Strip anything that changes between runs for reasons we do not care about.
 
-    Timestamps and absolute paths differ on every run and in every checkout, so
-    comparing them would make the golden file fail for no reason. Everything
-    else is kept, including floats, because a changed portfolio value is
-    exactly the kind of drift this harness is for.
+    Timestamps, absolute paths and the run metadata differ on every run or
+    every commit, so comparing them would make the golden file fail for no
+    behavioural reason. Everything else is kept, including floats, because a
+    changed portfolio value is exactly the kind of drift this harness is for.
     """
     if isinstance(value, dict):
         return {k: _scrub(v) for k, v in value.items()
-                if k not in ("timestamp", "time", "curr_time", "path",
-                             "sim_folder", "log_path")}
+                if k not in _VOLATILE_KEYS}
     if isinstance(value, list):
         return [_scrub(v) for v in value]
     if isinstance(value, float):
