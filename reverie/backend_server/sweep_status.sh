@@ -47,6 +47,7 @@ n_done=0
 n_trunc=0
 n_missing=0
 n_stranded=0
+n_running=0
 
 # classify <name> -- print one config's state and bump the matching counter.
 #
@@ -77,10 +78,21 @@ classify () {
         state="truncated"
         detail="log present, no report ($(wc -l < "$log") lines)"
         n_trunc=$(( n_trunc + 1 ))
-    elif [ -f "$STAGE/$name.log" ]; then
+    elif [ -f "$STAGE/$name.log" ] && grep -q "REPORT$" "$STAGE/$name.log"; then
         state="stranded"
         detail="finished log still in $STAGE: the run completed, the copy failed"
         n_stranded=$(( n_stranded + 1 ))
+    elif [ -f "$STAGE/$name.log" ] && pgrep -f -- "--sim [^ ]*_${name}( |\$)" >/dev/null; then
+        # A staged log with no report is the normal state of the config in
+        # flight. This used to be reported as "stranded ... the run completed",
+        # which sent a healthy sweep's operator looking for a failed copy.
+        state="running"
+        detail="tail -f $STAGE/$name.log"
+        n_running=$(( n_running + 1 ))
+    elif [ -f "$STAGE/$name.log" ]; then
+        state="killed"
+        detail="no report and no live process: interrupted mid-run, a rerun redoes it"
+        n_trunc=$(( n_trunc + 1 ))
     else
         state="missing"
         n_missing=$(( n_missing + 1 ))
@@ -111,7 +123,8 @@ for s in $SEEDS; do
 done
 
 echo "done      : $n_done"
-echo "incomplete: $n_trunc   (truncated, uncopied, or a .done with no report)"
+echo "running   : $n_running"
+echo "incomplete: $n_trunc   (truncated, uncopied, killed, or a .done with no report)"
 echo "stranded  : $n_stranded   (finished, log never copied off local disk)"
 echo "missing   : $n_missing"
 echo ""

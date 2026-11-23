@@ -190,12 +190,13 @@ run () {   # run <name> <script> <args...>
         echo "          python -u $*"
         return 0
     fi
-    echo "[$(date +%T)] START $name"
     local t0=$SECONDS
     # Written to LOCAL disk first. Writing straight to the NFS export is how a
     # failing export truncates a log that is still being appended to; staging
     # locally means the only network write is one copy of a finished file.
     local stage_log="$STAGE/$name.log"
+    # The per-step output goes to stage_log, not here, so say where to watch it.
+    echo "[$(date +%T)] START $name   (live: tail -f $stage_log)"
     # -u: without it Python block-buffers into the file and a live tail shows
     # nothing for minutes, which reads as a hang.
     if python -u "$@" > "$stage_log" 2>&1; then

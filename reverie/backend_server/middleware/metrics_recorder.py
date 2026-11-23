@@ -142,6 +142,14 @@ def git_commit_info(repo_dir: Optional[str] = None) -> Dict[str, object]:
     return info
 
 
+# Read the commit when the process STARTS, not when the report is written.
+# Python has already loaded the code by then, so a `git checkout` during a run
+# would label old code with the new hash. That happened: a run 07 config
+# finished after a mid-sweep checkout and reported 4c79fa4 while running
+# 7511018. The cache above keeps this first answer for the process's lifetime.
+git_commit_info()
+
+
 def ollama_version(base_url: Optional[str] = None) -> str:
     """
     The Ollama server's reported version, or UNKNOWN if it cannot be asked.
