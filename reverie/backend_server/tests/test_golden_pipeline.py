@@ -409,6 +409,53 @@ def run_pipeline_snapshot(use_middleware: bool,
     }
 
 
+def run_log_and_report(use_middleware: bool,
+                       steps: int = GOLDEN_STEPS,
+                       seed: int = GOLDEN_SEED) -> tuple:
+    """
+    Run one arm and return its raw (log, report), without reducing either.
+
+    Exists for test_metrics_recorder's equivalence check, which needs the full
+    log entries and the real report dict rather than the trimmed snapshot the
+    golden comparison uses. Kept here so there is one definition of how a
+    deterministic run is set up: a second copy would be free to drift from the
+    stub configuration the golden files were captured under, and then the two
+    test files would disagree about what "a 20-step run" means.
+
+    The caller is responsible for removing the simulation folder; the sim code
+    is namespaced for that.
+    """
+    arm = "middleware" if use_middleware else "baseline"
+    sim_code = f"_equiv_{arm}_s{seed}"
+    fake = _FakeOllama()
+
+    import requests as _requests
+    from middleware import id_rag as _id_rag
+
+    _id_rag.id_rag_cache_clear()
+
+    with mock.patch.object(_requests, "post", side_effect=fake.post):
+        from trading_reverie import TradingReverie
+
+        target = Path(_storage_root()) / sim_code
+        if target.exists():
+            shutil.rmtree(target)
+
+        sim = TradingReverie(
+            sim_code=sim_code,
+            fork_sim_code="base_trading",
+            use_middleware=use_middleware,
+            fresh=True,
+            seed=seed,
+            temperature=GOLDEN_TEMPERATURE,
+        )
+        log = sim.run(steps)
+        report = sim._generate_report(log, steps)
+
+    shutil.rmtree(Path(_storage_root()) / sim_code, ignore_errors=True)
+    return log, report
+
+
 def _storage_root() -> str:
     """Absolute path of the simulation storage directory the runner writes to."""
     from utils import fs_storage
