@@ -433,7 +433,7 @@ Then `http://localhost:8000/`. Full description in **§9**.
 
 - Runs 02–05 analysed. Every headline number from them has been traced to either
   a real effect or an artefact; see the table in §2.
-- Run-05 fixes committed: `264db38` (denominator, feedback gate, arm symmetry,
+- Run-05 fixes committed: `99f36ff` (denominator, feedback gate, arm symmetry,
   reflection parser), `4c6897e` (stale detector replaced outright).
 - Frontend rebuilt: `010960f`.
 - **Run 06 has landed and been analysed (CHANGES §23).** All 16 configs
@@ -446,11 +446,24 @@ Then `http://localhost:8000/`. Full description in **§9**.
   bought n≈1. Two further defects: `paired_eval.py` never updated the ID-RAG
   graph (so it ran different middleware from the runner, diverging at step 1),
   and the report let an abstaining arm look clean. All three are fixed and
-  committed (`f2ea081`, CHANGES §24). The seed fix is confirmed on the DGX:
+  committed (`43a2d40`, CHANGES §24). The seed fix is confirmed on the DGX:
   seeds 42 and 43 now produce different actions, symbols and sizes (§24.4).
-- Test suite: **141 passing** (`tests/test_run06_defects.py` is new).
-- **Run 07 — the re-sweep — is executing on the DGX.** `run_sweep.sh` is
-  pointed at it (`OUT=/workspace/run07`, `TEMPERATURE=0.7`).
+- Test suite: **213 passing** (was 141; the middleware refactor below added the
+  rest).
+- **Run 07 has NOT been run.** This file previously said it was "executing on
+  the DGX"; that was written on 2026-08-18 and is not true. No Run 07 log,
+  `.done` marker or analysis exists anywhere in the repo. `run_sweep.sh` is
+  still pointed at it (`OUT=/workspace/run07`, `TEMPERATURE=0.7`), so the
+  configuration landed and the sweep did not. Check `/workspace/run07/` on the
+  DGX before assuming anything about it.
+- **Middleware refactor, since 2026-11-22**, on branch
+  `kriti/middleware-wrapper`, not yet merged. Both arms' behaviour is unchanged,
+  held by a golden-file harness captured before the work started. The pipeline
+  is composed by one entry point (`middleware/middleware_wrapper.py`) rather
+  than assembled separately by each harness, every metric has one definition
+  (`middleware/metrics_recorder.py`), reports now record what produced them,
+  server failures are counted apart from model failures, and three dead files
+  are gone. See `middleware/README.md` and CHANGES.md.
 
 **Next actions are in [CHANGES.md §25](CHANGES.md).** The seed smoke test (item
 1) has passed; item 2 is reading run 07 when it lands, and the first thing to
