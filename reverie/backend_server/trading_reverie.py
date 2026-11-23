@@ -100,6 +100,7 @@ from middleware.id_rag import (
 )
 from middleware.middleware_wrapper import (
     MiddlewareWrapper,
+    WrapperConfig,
     raw_memory_context,
 )
 from middleware.metrics_recorder import (
@@ -158,7 +159,9 @@ def make_trading_decision(persona: TradingPersona,
                           action_log_path: str,
                           use_middleware: bool = True,
                           seed: int = None,
-                          temperature: float = 0.0) -> dict:
+                          temperature: float = 0.0,
+                          components=None,
+                          baseline_states_risk_cap: bool = False) -> dict:
     """
     Ask the LLM to decide what to do next.
     Returns (decision, compression_stats, filter_stats), where decision is
@@ -204,7 +207,13 @@ def make_trading_decision(persona: TradingPersona,
         # single retry and HOLD fallback. The wrapper delegates to the same
         # functions this code called before and adds no logic of its own, so
         # the default path is unchanged; tests/golden/ holds it to that.
-        wrapper = MiddlewareWrapper(action_log_path=action_log_path)
+        # components=None means the shipped arm, all three stages. A component
+        # set makes this an ABLATION arm, which must never be reported as the
+        # middleware; WrapperConfig.is_full_middleware marks the difference.
+        config = (WrapperConfig(components=frozenset(components))
+                  if components else None)
+        wrapper = MiddlewareWrapper(config=config,
+                                    action_log_path=action_log_path)
         prepared = wrapper.prepare(persona, market, retrieved)
         outcome = wrapper.decide(prepared, _call_llm)
         return outcome.decision, outcome.compression_stats, outcome.stats
@@ -218,6 +227,7 @@ def make_trading_decision(persona: TradingPersona,
         memory_context,
         _call_llm,
         action_log_path,
+        state_risk_cap=baseline_states_risk_cap,
     )
     return decision, mc_stats, filter_stats
 
@@ -226,7 +236,8 @@ def free_form_decision(persona: TradingPersona,
                        market:  MarketEnvironment,
                        memory_context: str,
                        llm_call,
-                       action_log_path: str) -> dict:
+                       action_log_path: str,
+                       state_risk_cap: bool = False) -> dict:
     """
     Baseline (no-middleware) decision path.
 
@@ -261,12 +272,33 @@ def free_form_decision(persona: TradingPersona,
     s = persona.scratch
     tradeable = _get_tradeable_symbols(persona, market)
     market_open = "OPEN" if _market_is_open(market) else "CLOSED"
+
+    # WP5. Off by default, so the prompt is byte-identical to every run so far.
+    #
+    # The baseline prompt gives only a risk WORD ("moderate") while the
+    # middleware prompt prints the maximum legal quantity, so part of the
+    # baseline's resizing may be the model breaking a limit it was never told:
+    # in run 06, 10 of 18 resized baseline orders were clamped for the risk cap
+    # and 8 for holdings. This flag closes that information gap, which is the
+    # "unequal information" limitation.
+    #
+    # It states the LIMIT, not the computed maximum quantity. Giving the number
+    # of shares would hand the baseline the filter's arithmetic and stop it
+    # being a baseline; the agent must still do the multiplication itself.
+    risk_cap_line = ""
+    if state_risk_cap:
+        limit = float(getattr(s, "risk_limit_per_trade", 0.0) or 0.0)
+        if limit > 0:
+            risk_cap_line = (
+                f"Your risk limit is {limit * 100:.0f}% of your portfolio "
+                f"value on any single trade. Do not exceed it.\n")
+
     prompt = f"""You are {s.name}, a {getattr(s, 'trader_type', None) or 'generalist'} trader.
 Traits: {getattr(s, 'innate', '')}
 Background: {getattr(s, 'learned', '')}
 Current situation: {getattr(s, 'currently', '')}
 Risk tolerance: {getattr(s, 'risk_tolerance', '')}
-
+{risk_cap_line}
 Current state:
 - Cash: ${s.cash_balance:,.2f}
 - Holdings: {s.positions}
@@ -968,11 +1000,18 @@ class TradingReverie:
 
     def __init__(self, sim_code: str, fork_sim_code: str = "base_trading",
                  use_middleware: bool = True, fresh: bool = False,
-                 seed: int = 42, temperature: float = 0.7):
+                 seed: int = 42, temperature: float = 0.7,
+                 components=None,
+                 baseline_states_risk_cap: bool = False):
         self.sim_code       = sim_code
         self.fork_sim_code  = fork_sim_code
         self.use_middleware = use_middleware
         self.seed           = seed
+        # None means the shipped middleware, all three stages. A component set
+        # makes this an ablation arm; see MiddlewareWrapper. Both default to
+        # the behaviour every run so far has had.
+        self.components     = components
+        self.baseline_states_risk_cap = baseline_states_risk_cap
         # Decision-call sampling temperature. MUST be > 0 for --seed to reach
         # agent behaviour at all: greedy decoding ignores the seed, which is
         # why run 06's four seeds produced an effectively single middleware
@@ -1221,6 +1260,8 @@ class TradingReverie:
             use_middleware=self.use_middleware,
             seed=self.seed,
             temperature=self.temperature,
+            components=self.components,
+            baseline_states_risk_cap=self.baseline_states_risk_cap,
         )
         print(f"  [{name}] decision: {decision.get('action','?')} "
               f"{decision.get('symbol','')} x{decision.get('quantity','')}")
@@ -1884,12 +1925,45 @@ def main():
                              "model decodes greedily and every seed replays "
                              "the same decisions (run 06). Use 0 only to "
                              "reproduce a pre-run-07 result.")
+    parser.add_argument("--components", default=None,
+                        help="ABLATION ARM. Comma-separated subset of "
+                             "compression,idrag,filter. Omit for the shipped "
+                             "middleware, which is all three. Naming a subset "
+                             "produces a research arm that answers what one "
+                             "stage contributes; it is NOT the middleware and "
+                             "its numbers must not be reported as such. "
+                             "Ignored with --no-middleware, since the baseline "
+                             "has no stages to select.")
+    parser.add_argument("--baseline-states-risk-cap", action="store_true",
+                        help="Baseline arm only. Add the persona's numeric "
+                             "per-trade risk limit to the prompt in prose. The "
+                             "baseline otherwise gets only a risk word while "
+                             "the middleware prompt prints the maximum legal "
+                             "quantity, so some of the baseline's resized "
+                             "orders may break a limit it was never told. The "
+                             "computed maximum quantity is still withheld, so "
+                             "the agent does its own arithmetic. Off by "
+                             "default: switching it on makes results "
+                             "incomparable to earlier runs, so use a new sim "
+                             "name.")
     args = parser.parse_args()
+
+    # Parsed here rather than in TradingReverie so a typo fails before the fork
+    # is copied and GPU time is spent. WrapperConfig rejects unknown names.
+    components = None
+    if args.components:
+        components = frozenset(
+            c.strip() for c in args.components.split(",") if c.strip())
+        WrapperConfig(components=components)   # validates, raises on a typo
+        print(f"[TradingReverie] ABLATION ARM: components="
+              f"{sorted(components)} -- this is NOT the shipped middleware")
 
     sim = TradingReverie(args.sim, args.fork,
                          use_middleware=not args.no_middleware,
                          fresh=args.fresh, seed=args.seed,
-                         temperature=args.temperature)
+                         temperature=args.temperature,
+                         components=components,
+                         baseline_states_risk_cap=args.baseline_states_risk_cap)
     sim.run(args.steps)
 
 
