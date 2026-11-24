@@ -86,7 +86,11 @@
 	// floor they are kept out of the trading rows (one stays at the far end of
 	// y=18) and sit in the CEO and far-right offices -- a dimmed figure beside
 	// a trader reads as a trader who failed to load.
-	const NPC_ROUTES = [
+	// Ambient staff are OFF. They are drawn at 55% opacity to read as scenery,
+	// but beside nine traders a dimmed figure looks like an agent that failed to
+	// load. Set to true to bring the office staff back.
+	const SHOW_AMBIENT_STAFF = false;
+	const AMBIENT_STAFF_ROUTES = [
 	  // Homes are chair tiles -- solid in the collision layer, reachable
 	  // because find_path allows a solid destination (walk adjacent, step in).
 	  {key: "npc_abigail",  role: "desk", home: [3, 4],   stops: [[6, 4], [5, 5]]},
@@ -96,6 +100,7 @@
 	  {key: "npc_jennifer", role: "roam", home: [26, 20], stops: [[26, 20], [29, 20], [28, 20]]},
 	  {key: "npc_tamara",   role: "roam", home: [28, 7],  stops: [[28, 7], [30, 7], [31, 7]]}
 	];
+	const NPC_ROUTES = SHOW_AMBIENT_STAFF ? AMBIENT_STAFF_ROUTES : [];
 	let light_overlay = null;   // daylight wash, driven by the simulated clock
 	let board_ticker = null;    // in-world price list on the market board
 	let board_flash = null;     // overlay tinted green/red on a shock move
