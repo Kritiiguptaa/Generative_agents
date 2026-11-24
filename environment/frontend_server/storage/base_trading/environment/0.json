@@ -1,5 +1,38 @@
 {
-  "Alex Chen":  {"x": 17, "y": 8},
-  "Marcus Webb": {"x": 22, "y": 8},
-  "Sara Kim":   {"x": 27, "y": 8}
+  "Alex Chen": {
+    "x": 17,
+    "y": 8
+  },
+  "Marcus Webb": {
+    "x": 22,
+    "y": 8
+  },
+  "Sara Kim": {
+    "x": 27,
+    "y": 8
+  },
+  "Margaret Okafor": {
+    "x": 32,
+    "y": 8
+  },
+  "Daniel Reyes": {
+    "x": 37,
+    "y": 8
+  },
+  "Priya Nair": {
+    "x": 42,
+    "y": 8
+  },
+  "Tomas Herrera": {
+    "x": 47,
+    "y": 8
+  },
+  "Jade Whitfield": {
+    "x": 52,
+    "y": 8
+  },
+  "Kofi Mensah": {
+    "x": 57,
+    "y": 8
+  }
 }

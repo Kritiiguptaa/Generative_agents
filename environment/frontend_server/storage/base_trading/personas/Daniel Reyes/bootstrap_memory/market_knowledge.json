@@ -1,0 +1,27 @@
+{
+  "known_stocks": {
+    "AAPL": {
+      "sector": "consumer technology",
+      "last_known_price": 275.21,
+      "notes": [
+        "Core large-cap; staged entries on confirmed strength"
+      ]
+    },
+    "GOOGL": {
+      "sector": "internet / AI",
+      "last_known_price": 339.91,
+      "notes": [
+        "Diversified revenue; low drawdown risk relative to peers"
+      ]
+    },
+    "NVDA": {
+      "sector": "semiconductors",
+      "last_known_price": 192.2,
+      "notes": [
+        "High volatility — hold at half size per policy"
+      ]
+    }
+  },
+  "known_agents": [],
+  "market_context": "Policy first. Stage entries, confirm on volume, respect stops."
+}

@@ -1,0 +1,27 @@
+{
+  "known_stocks": {
+    "TSLA": {
+      "sector": "electric vehicles",
+      "last_known_price": 371.18,
+      "notes": [
+        "Big swings — best source of contrarian entries"
+      ]
+    },
+    "AMD": {
+      "sector": "semiconductors",
+      "last_known_price": 512.63,
+      "notes": [
+        "Volatile; sharp drops are buying chances"
+      ]
+    },
+    "GOOGL": {
+      "sector": "internet / AI",
+      "last_known_price": 339.91,
+      "notes": [
+        "Slower mover; use as a rotation target"
+      ]
+    }
+  },
+  "known_agents": [],
+  "market_context": "Contrarian. Buy fear, sell euphoria, trade often."
+}

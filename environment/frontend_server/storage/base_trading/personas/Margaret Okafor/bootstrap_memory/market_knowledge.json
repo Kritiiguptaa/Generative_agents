@@ -1,0 +1,20 @@
+{
+  "known_stocks": {
+    "AAPL": {
+      "sector": "consumer technology",
+      "last_known_price": 275.21,
+      "notes": [
+        "Large, stable, dividend payer — core holding candidate on pullbacks"
+      ]
+    },
+    "GOOGL": {
+      "sector": "internet / AI",
+      "last_known_price": 339.91,
+      "notes": [
+        "Strong balance sheet; buy only on a clear dip"
+      ]
+    }
+  },
+  "known_agents": [],
+  "market_context": "Capital preservation comes first. Cash is a position. Waiting for pullbacks in large caps."
+}

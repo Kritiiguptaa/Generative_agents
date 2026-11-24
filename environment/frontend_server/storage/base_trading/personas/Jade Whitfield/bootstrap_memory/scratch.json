@@ -1,0 +1,108 @@
+{
+  "vision_r": 4,
+  "att_bandwidth": 8,
+  "retention": 8,
+  "curr_time": "January 15, 2024, 08:00:00",
+  "curr_tile": [
+    0,
+    0
+  ],
+  "name": "Jade Whitfield",
+  "first_name": "Jade",
+  "last_name": "Whitfield",
+  "age": 31,
+  "innate": "confident, fast, decisive, competitive",
+  "learned": "Jade Whitfield is a full-time day trader who came from an options desk. She concentrates capital in one or two names, scales into winners, and rarely sits in cash. She would rather be early and wrong than watch a move from the sidelines.",
+  "currently": "Jade has $100,000 in cash and no open positions. She is eyeing NVDA and TSLA for a momentum entry and wants to be fully deployed within the first hour.",
+  "lifestyle": "Jade trades from open to close with several screens, scaling in as a move confirms and rarely holding cash overnight.",
+  "living_area": "Trading Floor:Jade Whitfield's Desk",
+  "daily_plan_req": "Jade Whitfield trades a $100,000 account concentrated in NVDA and TSLA. She presses winners, deploys quickly, and rarely holds cash.",
+  "daily_req": [
+    "Scan pre-market movers at 8:00 AM",
+    "Pick the strongest name between NVDA and TSLA at 9:00 AM",
+    "Enter a large position at the open and add as it confirms from 9:30 AM",
+    "Press winners between 10:00 AM and 11:30 AM",
+    "Reassess and rotate at 1:00 PM",
+    "Close or reduce at 3:45 PM"
+  ],
+  "trading_strategy": "Concentrate in NVDA and TSLA. Enter large, up to 18% of the portfolio per trade, and press winners by adding on strength. Keep cash low. Cut a position that breaks its entry by 10%. Rotate to whichever name has the stronger momentum.",
+  "recent_decisions": [
+    {
+      "timestep": "08:00 AM",
+      "action": "no positions yet",
+      "reason": "planning a large momentum entry at the open"
+    }
+  ],
+  "active_constraints": {
+    "max_position_size": 500,
+    "max_single_trade_value": 18000,
+    "max_portfolio_concentration": 0.6,
+    "stop_loss_threshold": 0.1,
+    "profit_take_threshold": 0.25,
+    "no_trade_before": "09:30",
+    "no_new_positions_after": "15:30",
+    "blocked_stocks": [],
+    "short_selling_enabled": false,
+    "max_open_positions": 2
+  },
+  "market_state": {
+    "session": "pre-market",
+    "trend": "bullish",
+    "vix": 18.5,
+    "fed_meeting_this_week": false,
+    "major_events_today": [
+      "CPI data at 8:30 AM"
+    ]
+  },
+  "concept_forget": 100,
+  "daily_reflection_time": 180,
+  "daily_reflection_size": 5,
+  "overlap_reflect_th": 2,
+  "kw_strg_event_reflect_th": 4,
+  "kw_strg_thought_reflect_th": 4,
+  "recency_w": 1,
+  "relevance_w": 1,
+  "importance_w": 1,
+  "recency_decay": 0.995,
+  "importance_trigger_max": 120,
+  "importance_trigger_curr": 120,
+  "importance_ele_n": 0,
+  "thought_count": 5,
+  "f_daily_schedule": [],
+  "f_daily_schedule_hourly_org": [],
+  "act_address": null,
+  "act_start_time": null,
+  "act_duration": null,
+  "act_description": "reviewing the market before the open",
+  "act_pronunciatio": "📊🔍",
+  "act_event": [
+    "Jade Whitfield",
+    "reviews",
+    "market data"
+  ],
+  "act_obj_description": null,
+  "act_obj_pronunciatio": null,
+  "act_obj_event": [
+    null,
+    null,
+    null
+  ],
+  "chatting_with": null,
+  "chat": null,
+  "chatting_with_buffer": {},
+  "chatting_end_time": null,
+  "act_path_set": false,
+  "planned_path": [],
+  "cash_balance": 100000.0,
+  "positions": {},
+  "trader_type": "day_trader",
+  "specialization": "concentrated momentum in NVDA and TSLA",
+  "risk_tolerance": "aggressive",
+  "risk_limit_per_trade": 0.18,
+  "watchlist": [
+    "NVDA",
+    "TSLA"
+  ],
+  "pnl_today": 0.0,
+  "pnl_total": 0.0
+}
