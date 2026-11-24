@@ -29,7 +29,7 @@
 <div class="topbar">
 	<a class="brand" href="/"><span class="mark">A</span>AGENT&nbsp;<span>ANCHOR</span></a>
 	<span class="chip">{{ sim_code }}</span>
-	<span class="chip">3 agents · modern office</span>
+	<span class="chip">{{ persona_names|length }} agents · modern office</span>
 	<a class="chip" href="/run/{{ sim_code }}/">run explorer ↗</a>
 	<div class="spacer"></div>
 	<div class="clock" id="game-time-content">—</div>
@@ -113,7 +113,7 @@
     <div class="agent-card" id="card-{{p.underscore}}" data-key="{{p.underscore}}">
       <div class="agent-top">
         {% with 'assets/characters/profile/'|add:p.underscore|add:'.png' as image_static %}
-        <img src="{% static image_static %}" alt="{{ p.original }}">
+        <img src="{% static image_static %}" alt="{{ p.original }}" data-cast="{{ p.underscore }}">
         {% endwith %}
         <div class="agent-id">
           <div class="agent-name">{{ p.original }}</div>

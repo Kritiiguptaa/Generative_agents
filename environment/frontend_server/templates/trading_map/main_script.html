@@ -148,9 +148,9 @@
 	  this.load.tilemapTiledJSON("map", "{% static 'assets/office/visuals/munder_office.json' %}");
 
 	  {% for p in persona_names %}
-		  {# Every agent with a recipe in procedural_cast.js gets a procedurally
-		     drawn texture instead (munder_office's look, not a sprite sheet).
-		     Anyone without a recipe falls back to the atlas. #}
+		  {% comment %}Every agent with a recipe in procedural_cast.js gets a
+		     procedurally drawn texture instead (munder_office's look, not a
+		     sprite sheet). Anyone without a recipe falls back to the atlas.{% endcomment %}
 		  if (!(window.ProceduralCast && window.ProceduralCast.RECIPE_NAMES.indexOf("{{p.underscore}}") >= 0)) {
 			  {% with 'assets/characters/'|add:p.underscore|add:'.png' as image_static %}
 				  this.load.atlas("{{p.underscore}}", "{% static image_static %}",

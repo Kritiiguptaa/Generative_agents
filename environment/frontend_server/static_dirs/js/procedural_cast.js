@@ -376,8 +376,42 @@
     return true;
   }
 
+  /**
+   * A head-and-chest portrait of `underscoreKey` as a PNG data URL, drawn from
+   * the same recipe as the map sprite, or null when there is no recipe. Used
+   * for the agent cards: agents that have no profile PNG on disk would
+   * otherwise render a broken image.
+   */
+  function avatar_data_url(underscoreKey) {
+    var r = RECIPES[underscoreKey];
+    if (!r) return null;
+    var canvas = document.createElement("canvas");
+    canvas.width = SCENE_W; canvas.height = 24;
+    var ctx = canvas.getContext("2d");
+    blit(ctx, composeScene(r, 0, false), 0, 0);
+    return canvas.toDataURL("image/png");
+  }
+
+  // Swap in a drawn portrait for any card image that failed to load.
+  function fix_card_avatars() {
+    var imgs = document.querySelectorAll("img[data-cast]");
+    for (var i = 0; i < imgs.length; i++) (function (img) {
+      var fix = function () {
+        var u = avatar_data_url(img.getAttribute("data-cast"));
+        if (u) { img.style.imageRendering = "pixelated"; img.src = u; }
+      };
+      if (img.complete && img.naturalWidth === 0) fix();
+      else img.addEventListener("error", fix, { once: true });
+    })(imgs[i]);
+  }
+  if (typeof document !== "undefined" && document.addEventListener) {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fix_card_avatars);
+    else fix_card_avatars();
+  }
+
   global.ProceduralCast = {
     RECIPE_NAMES: Object.keys(RECIPES),
-    build_cast_texture: build_cast_texture
+    build_cast_texture: build_cast_texture,
+    avatar_data_url: avatar_data_url
   };
 })(window);
