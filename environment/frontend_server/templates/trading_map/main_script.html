@@ -82,17 +82,19 @@
 	//
 	// Desk tiles are the map's own spawn-points (munder_office.json): the nine
 	// traders sit at pc-1..6 (y=13) and the first three desks of the y=18 row
-	// (x=2,6,10), so background staff take the rest of the y=18 row and the
-	// far-right offices -- this map's own furniture layout.
+	// (x=2,6,10). Staff are drawn at 55% opacity, so with nine traders on the
+	// floor they are kept out of the trading rows (one stays at the far end of
+	// y=18) and sit in the CEO and far-right offices -- a dimmed figure beside
+	// a trader reads as a trader who failed to load.
 	const NPC_ROUTES = [
 	  // Homes are chair tiles -- solid in the collision layer, reachable
 	  // because find_path allows a solid destination (walk adjacent, step in).
-	  {key: "npc_abigail",  role: "desk", home: [14, 18], stops: [[20, 7], [16, 20]]},
-	  {key: "npc_adam",     role: "desk", home: [18, 18], stops: [[27, 5], [16, 20]]},
-	  {key: "npc_rajiv",    role: "desk", home: [22, 18], stops: [[30, 5], [23, 7]]},
-	  {key: "npc_eddy",     role: "desk", home: [30, 5],  stops: [[27, 5], [16, 20]]},
-	  {key: "npc_jennifer", role: "roam", home: [27, 14], stops: [[27, 14], [26, 20], [29, 13]]},
-	  {key: "npc_tamara",   role: "roam", home: [12, 19], stops: [[12, 19], [16, 20], [20, 19]]}
+	  {key: "npc_abigail",  role: "desk", home: [3, 4],   stops: [[6, 4], [5, 5]]},
+	  {key: "npc_adam",     role: "desk", home: [27, 5],  stops: [[28, 7], [30, 7]]},
+	  {key: "npc_rajiv",    role: "desk", home: [22, 18], stops: [[22, 19], [16, 20]]},
+	  {key: "npc_eddy",     role: "desk", home: [30, 5],  stops: [[28, 7], [29, 7]]},
+	  {key: "npc_jennifer", role: "roam", home: [26, 20], stops: [[26, 20], [29, 20], [28, 20]]},
+	  {key: "npc_tamara",   role: "roam", home: [28, 7],  stops: [[28, 7], [30, 7], [31, 7]]}
 	];
 	let light_overlay = null;   // daylight wash, driven by the simulated clock
 	let board_ticker = null;    // in-world price list on the market board
@@ -342,7 +344,10 @@
 	    // matching the Munder Difflin office palette (cream-100 / ink-700)
 	    // rather than the console's dark HUD chrome -- this label sits ON an
 	    // agent's head, not behind the ANCHOR-1's glass.
-	    name_plates[key] = this.add.text(start_x, start_y + plate_dy, key.replace(/_/g, " "), {
+	    // First name only: with nine traders gathering on two-tile spacing at the
+	    // break area, "Margaret Okafor" is wider than the gap. The full name is on
+	    // the agent cards below the map.
+	    name_plates[key] = this.add.text(start_x, start_y + plate_dy, key.split("_")[0], {
 	      fontFamily: "monospace", fontSize: "6px", color: "#3d2e4a",
 	      backgroundColor: "#fff8e7", padding: {x: 2, y: 1}
 	    }).setOrigin(0.5, 0).setDepth(3).setResolution(3);

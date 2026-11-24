@@ -88,10 +88,21 @@ MEETING_HOLD_STEPS = 3
 # "cafe-stand-coffee" spawn point at exactly this tile -- walkable and open in
 # the collision layer, right in front of the coffee machine.
 #
-# BREAK_STRIDE spaces the agents two tiles apart along the same open row
-# (x=25..30 is clear) instead of crowding a single tile.
+# One standing tile per agent, spread over the cafeteria (rows y=12, 14, 16),
+# every one walkable and reachable in the collision layer (checked with a
+# flood fill from the coffee tile). This used to be BREAK_ROOM_TILE plus a
+# two-tile stride, which was enough for three agents: from the fourth on, the
+# x coordinate ran past the walls at x>=31 and past the 34-tile map, so those
+# agents had no valid break tile and the rest bunched along one row. The
+# bottom row (y=20) is not used: it sits against the map's lower edge, where
+# a nameplate under the sprite is clipped by the frame.
+BREAK_TILES = [
+    [25, 12], [27, 12], [29, 12],
+    [25, 14], [27, 14], [29, 14],
+    [25, 16], [28, 16], [31, 16],
+]
+# The "BREAK AREA" label is drawn at the coffee machine; this is only its anchor.
 BREAK_ROOM_TILE = [26, 20]
-BREAK_STRIDE = 2
 
 # An agent that holds this many steps running is sent to the break area instead
 # of sitting motionless at their desk.
@@ -253,7 +264,6 @@ def _apply_hold_streaks(movement, persona_names, map_width=44):
     and every metric attached to it are left exactly as logged, so the agent
     cards and decision log still report the HOLD that actually happened.
     """
-    bx, by = BREAK_ROOM_TILE
     for offset, agent in enumerate(sorted(persona_names)):
         streak = 0
         for step in sorted(movement.keys()):
@@ -265,8 +275,8 @@ def _apply_hold_streaks(movement, persona_names, map_width=44):
                 continue
             streak += 1
             if streak >= HOLD_STREAK_FOR_BREAK:
-                # One machine each, rather than three people on one tile.
-                rec["movement"] = [min(bx + offset * BREAK_STRIDE, map_width - 1), by]
+                # One tile each, rather than everyone on one tile.
+                rec["movement"] = list(BREAK_TILES[offset % len(BREAK_TILES)])
                 rec["pronunciatio"] = "☕"        # hot beverage
                 rec["on_break"] = True
                 rec["hold_streak"] = streak
