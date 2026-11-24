@@ -80,19 +80,19 @@
 	// where every single person is permanently walking about reads as a station
 	// concourse, so most of these are working and only two are in motion.
 	//
-	// Desk tiles are the map's own spawn-points (munder_office.json): the three
-	// traders sit at pc-1/2/3, so background staff take the remaining
-	// pc-4/5/6 and the lower desk row -- same arrangement, this map's own
-	// furniture layout instead of the old office.json's.
+	// Desk tiles are the map's own spawn-points (munder_office.json): the nine
+	// traders sit at pc-1..6 (y=13) and the first three desks of the y=18 row
+	// (x=2,6,10), so background staff take the rest of the y=18 row and the
+	// far-right offices -- this map's own furniture layout.
 	const NPC_ROUTES = [
 	  // Homes are chair tiles -- solid in the collision layer, reachable
 	  // because find_path allows a solid destination (walk adjacent, step in).
-	  {key: "npc_abigail",  role: "desk", home: [14, 13], stops: [[20, 7], [16, 20]]},
-	  {key: "npc_adam",     role: "desk", home: [18, 13], stops: [[27, 5], [16, 20]]},
-	  {key: "npc_rajiv",    role: "desk", home: [22, 13], stops: [[30, 5], [23, 7]]},
-	  {key: "npc_eddy",     role: "desk", home: [2, 18],  stops: [[6, 18], [16, 20]]},
+	  {key: "npc_abigail",  role: "desk", home: [14, 18], stops: [[20, 7], [16, 20]]},
+	  {key: "npc_adam",     role: "desk", home: [18, 18], stops: [[27, 5], [16, 20]]},
+	  {key: "npc_rajiv",    role: "desk", home: [22, 18], stops: [[30, 5], [23, 7]]},
+	  {key: "npc_eddy",     role: "desk", home: [30, 5],  stops: [[27, 5], [16, 20]]},
 	  {key: "npc_jennifer", role: "roam", home: [27, 14], stops: [[27, 14], [26, 20], [29, 13]]},
-	  {key: "npc_tamara",   role: "roam", home: [10, 18], stops: [[10, 18], [14, 18], [16, 20]]}
+	  {key: "npc_tamara",   role: "roam", home: [12, 19], stops: [[12, 19], [16, 20], [20, 19]]}
 	];
 	let light_overlay = null;   // daylight wash, driven by the simulated clock
 	let board_ticker = null;    // in-world price list on the market board
@@ -148,15 +148,15 @@
 	  this.load.tilemapTiledJSON("map", "{% static 'assets/office/visuals/munder_office.json' %}");
 
 	  {% for p in persona_names %}
-		  {% if p.underscore != "Alex_Chen" and p.underscore != "Marcus_Webb" and p.underscore != "Sara_Kim" %}
-			  {# The three traders get a procedurally-drawn texture instead (see
-			     procedural_cast.js) -- munder_office's look, not a sprite sheet.
-			     Anyone else (a hypothetical 4th agent) falls back to the atlas. #}
+		  {# Every agent with a recipe in procedural_cast.js gets a procedurally
+		     drawn texture instead (munder_office's look, not a sprite sheet).
+		     Anyone without a recipe falls back to the atlas. #}
+		  if (!(window.ProceduralCast && window.ProceduralCast.RECIPE_NAMES.indexOf("{{p.underscore}}") >= 0)) {
 			  {% with 'assets/characters/'|add:p.underscore|add:'.png' as image_static %}
 				  this.load.atlas("{{p.underscore}}", "{% static image_static %}",
 				  										  		     "{% static 'assets/characters/atlas.json' %}");
-				{% endwith %}
-		  {% endif %}
+			  {% endwith %}
+		  }
 	  {% endfor %}
 
 	  // Background staff. The office ships 28 character sheets and the sim only
@@ -286,7 +286,7 @@
 	  const anims = this.anims;
 	  let agent_index = 0;
 	  for (const key in persona_init_pos) {
-	    // Munder-Difflin-style procedurally-drawn texture for the three real
+	    // Munder-Difflin-style procedurally-drawn texture for the real
 	    // traders (see procedural_cast.js) -- built here, before the sprite,
 	    // under frame names ("down"/"up"/"left"/"right",
 	    // "<dir>-walk.000".."003") that match what atlas.json already provided,

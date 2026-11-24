@@ -36,11 +36,21 @@ ACTION_ICONS = {
 # ---------------------------------------------------------------------------
 
 # The map's own spawn-points layer names six desks "pc-1".."pc-6" in a row at
-# y=13 (tile), three tiles apart. One per trading agent, in persona order.
+# y=13 (tile), three tiles apart, and a second row of six workstations on y=18
+# at the same x. One per trading agent, in persona order: the first six agents
+# take pc-1..pc-6, the next three take the first three desks on the y=18 row.
+# The ambient staff that used to sit at pc-4/5/6 were moved to the rest of the
+# y=18 row (see NPC_ROUTES in trading_map/main_script.html).
 DESK_TILES = {
     "Alex Chen": [2, 13],
     "Marcus Webb": [6, 13],
     "Sara Kim": [10, 13],
+    "Margaret Okafor": [14, 13],
+    "Daniel Reyes": [18, 13],
+    "Priya Nair": [22, 13],
+    "Tomas Herrera": [2, 18],
+    "Jade Whitfield": [6, 18],
+    "Kofi Mensah": [10, 18],
 }
 
 # The map's "boardroom" zone (tiles x:9-17, y:3-7) is the meeting-room-with-a-

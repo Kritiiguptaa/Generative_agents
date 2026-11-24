@@ -1,6 +1,6 @@
 /*
-  Procedural character sprites for the trading floor's three agents (Alex Chen,
-  Marcus Webb, Sara Kim), matching the look of Munder Difflin's office cast --
+  Procedural character sprites for the trading floor's nine agents (Alex Chen,
+  Marcus Webb, Sara Kim and the six added in the 9-agent roster), matching the look of Munder Difflin's office cast --
   fully custom-drawn pixel-art busts (skin -> clothing -> face -> hair layered
   on an 18x32 canvas), NOT LimeZu sprites. Ported from that project's
   scene/office/portraitArt.ts (original: canvas ImageData -> Pixi Texture; here:
@@ -264,7 +264,7 @@
   }
 
   // ─── recipes: Alex Chen (hedge fund manager), Marcus Webb (retail day
-  // trader), Sara Kim (momentum trader) -- original designs, not a recolor of
+  // trader), Sara Kim (momentum trader), plus the six below -- original designs, not a recolor of
   // any Office cast member. ────────────────────────────────────────────────
   var RECIPES = {
     Alex_Chen: {
@@ -278,6 +278,33 @@
     Sara_Kim: {
       skin: "light", hairc: [30, 24, 22], hair: "styleFrame", hairargs: { length: 20, vol: 1 },
       cloth: "blouse", c1: [200, 90, 110], brow: "soft", mouth: "smile", lashes: true
+    },
+    // The six agents added with the 9-agent roster. Same rule as the first
+    // three: original designs, one look per persona, no two sharing a
+    // skin + hair + clothing combination.
+    Margaret_Okafor: {
+      skin: "dark", hairc: [150, 150, 156], hair: "styleShort", hairargs: { part: "R" },
+      cloth: "cardigan", c1: [96, 128, 118], c2: [236, 232, 220], brow: "soft", mouth: "neutral"
+    },
+    Daniel_Reyes: {
+      skin: "tan", hairc: [28, 28, 34], hair: "styleShort", hairargs: { part: "R" },
+      cloth: "suit", c1: [74, 76, 86], tie: [44, 64, 112], brow: "flat", mouth: "neutral"
+    },
+    Priya_Nair: {
+      skin: "brown", hairc: [24, 20, 22], hair: "styleFrame", hairargs: { length: 17, vol: 0 },
+      cloth: "dressshirt", c1: [214, 222, 236], brow: "flat", mouth: "neutral", lashes: true
+    },
+    Tomas_Herrera: {
+      skin: "tan", hairc: [66, 44, 30], hair: "styleShort", hairargs: { part: "L" },
+      cloth: "sweater", c1: [84, 112, 92], brow: "soft", mouth: "smile"
+    },
+    Jade_Whitfield: {
+      skin: "light", hairc: [186, 118, 58], hair: "styleFrame", hairargs: { length: 13, vol: 1 },
+      cloth: "blouse", c1: [62, 74, 172], brow: "raised", mouth: "grin", lashes: true
+    },
+    Kofi_Mensah: {
+      skin: "dark", hairc: [20, 18, 18], hair: "styleMessy", hairargs: { length: 6 },
+      cloth: "polo", c1: [204, 152, 52], c2: [172, 122, 40], brow: "raised", mouth: "grin"
     }
   };
 

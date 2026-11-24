@@ -539,6 +539,14 @@ def run_explorer(request, sim_code):
     "Alex Chen":   "over-caution -- waits for confirmation indefinitely",
     "Marcus Webb": "over-sizing beyond available cash",
     "Sara Kim":    "acting on stale headlines",
+    # The six added with the 9-agent roster. Design intent written with the
+    # personas (conservative / moderate / aggressive), not a measured result.
+    "Margaret Okafor": "never acting -- holds cash through every setup",
+    "Daniel Reyes":    "over-staging -- splits entries until none executes",
+    "Priya Nair":      "paralysis by skepticism -- waits for confirmation that never comes",
+    "Tomas Herrera":   "drifting off his own target weights",
+    "Jade Whitfield":  "over-concentration in one or two names",
+    "Kofi Mensah":     "over-trading and sizing beyond available cash",
   }
   agents = []
   for name in persona_names:
