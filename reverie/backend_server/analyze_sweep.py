@@ -254,12 +254,15 @@ def paired_section(paired):
     out = ["\n## Paired evaluation (both arms on identical world states)",
            "Discordant pairs are the informative ones. mw-only = middleware infeasible,",
            "baseline fine; base-only = baseline infeasible, middleware fine. base-only >",
-           "mw-only means middleware prevented infeasible requests on that seed."]
+           "mw-only means middleware prevented infeasible requests on that seed.",
+           "The infeasible RATE is per attempt, so an arm that attempts more trades can look",
+           "better on the rate and worse on the discordant counts (which are per matched",
+           "decision). Compare the attempt counts before reading either."]
     for arm in sorted({r["arm"] for r in paired}):
         rs = sorted((r for r in paired if r["arm"] == arm), key=lambda r: r["seed"])
         adv = rs[0].get("advanced_with", "?")
         out.append(f"\n{arm}  (world advanced with {adv})")
-        out.append(f"  {'seed':<6}{'pairs':>7}{'attempts':>10}{'infeasible % mw / base':>26}"
+        out.append(f"  {'seed':<6}{'pairs':>7}{'attempts mw / base':>20}{'infeasible % mw / base':>26}"
                    f"{'mw-only':>9}{'base-only':>11}   reading")
         better = worse = tie = 0
         for r in rs:
@@ -271,7 +274,8 @@ def paired_section(paired):
             else:
                 reading, tie = "tie", tie + 1
             f = lambda v: "n/a" if v is None else f"{v:.1f}"
-            out.append(f"  {r['seed']:<6}{r.get('pairs', 0):>7}{f(r['mw'].get('attempts')):>10}"
+            out.append(f"  {r['seed']:<6}{r.get('pairs', 0):>7}"
+                       f"{f(r['mw'].get('attempts')) + ' / ' + f(r['base'].get('attempts')):>20}"
                        f"{f(r['mw'].get('infeasible_pct')) + ' / ' + f(r['base'].get('infeasible_pct')):>26}"
                        f"{c['mw_only']:>9}{c['base_only']:>11}   {reading}")
         mo = sum(r["cont"]["mw_only"] for r in rs)
