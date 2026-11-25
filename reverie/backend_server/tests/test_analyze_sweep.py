@@ -198,6 +198,14 @@ class Aggregation(unittest.TestCase):
         self.assertEqual(A.persona_coverage(sbm, "mw", "moderate", [42, 43]), (20, 200))
         self.assertEqual(A.persona_coverage(sbm, "mw", "conservative", [42, 43]), (100, 100))
 
+    def test_an_agent_with_no_persona_score_prints_na_not_nan(self):
+        s = self.s
+        s.write("mw_s42.log", log(block("Mo Mod", persona="N/A", scored=0, drift=0)))
+        rows, notes = s.load()
+        text = A.report(rows, notes)
+        self.assertNotIn("nan", text)
+        self.assertRegex(text, r"Mo Mod\s+moderate\s+\S+\s+n/a")
+
     def test_csv_has_one_row_per_arm_seed_agent(self):
         s = self.s
         s.write("mw_s42.log", log(block("Ann Aggr"), block("Cara Cons")))

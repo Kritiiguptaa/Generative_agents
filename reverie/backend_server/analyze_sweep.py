@@ -541,7 +541,7 @@ def report(rows, notes, paired=None):
         dc = sum(x.get("decisions", 0) for x in rs)
         cov = f"{100.0 * sc / dc:.0f}%" if dc else "n/a"
         out.append(f"  {r['arm']:<8}{r['agent']:<18}{r['bucket']:<14}{hold:>8.1f}"
-                   f"{(statistics.mean(per) if per else float('nan')):>9.2f}{cov:>9}"
+                   f"{(f'{statistics.mean(per):.2f}' if per else 'n/a'):>9}{cov:>9}"
                    f"{statistics.mean(x.get('drift', 0) for x in rs):>10.1f}"
                    f"{statistics.mean(x.get('buy', 0) for x in rs):>7.1f}{len(rs):>7}")
 
