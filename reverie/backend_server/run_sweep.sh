@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Run 06 -- multi-seed sweep for the trading-agent hallucination study.
+# Multi-seed sweep for the trading-agent hallucination study.
+#
+# RUN names the sweep (default run08) and sets both the output folder
+# (/workspace/$RUN) and the sim names ($RUN_mw_s42, ...). It used to be
+# hard-coded to run07, so rerunning with a different roster would have found
+# run07's .done markers, skipped every config, or mixed new results into the
+# old folder. FORK picks the roster: base_trading is the nine-agent roster,
+# base_trading_3agent the original three (for a rerun comparable with run07).
 #
 # WHY SEEDS, NOT LONGER RUNS: every report so far has been n=1, and a single
 # seed cannot support a rate claim no matter how many steps it covers. On the
@@ -30,7 +37,9 @@ set -u   # NOT -e: one crashed config must not kill the remaining seeds
 STEPS=${STEPS:-200}
 read -r -a SEEDS <<< "${SEEDS:-42 43 44 45}"
 MAX_HOURS=${MAX_HOURS:-10}
-OUT=${OUT:-/workspace/run07}
+RUN=${RUN:-run08}
+FORK=${FORK:-base_trading}
+OUT=${OUT:-/workspace/$RUN}
 # Sampling temperature for the decision call. MUST stay > 0: run 06 swept four
 # seeds at temperature=0, where decoding is greedy and the seed reaches only
 # the market generator. The middleware arm consequently replayed one
@@ -76,6 +85,44 @@ mkdir -p "$OUT" "$STAGE"
 # and lives on a different filesystem, so both are checked: run 07 died on
 # ENOSPC and checking only the log directory would not have caught it.
 SIM_STORAGE=${SIM_STORAGE:-../../environment/frontend_server/storage}
+
+# --- resume guard -------------------------------------------------------------
+# $OUT/SWEEP_META records what this sweep was started with. Re-running into a
+# folder that holds results from a different roster, step count, temperature or
+# code version would silently mix incomparable configs: run 07's mw_s43 was
+# mislabeled by a checkout made mid-run, and a nine-agent run dropped into a
+# three-agent folder would skip every config on its .done marker. So a resume
+# must match, and a mismatch stops the sweep before it starts.
+# FORCE_RESUME=1 overrides it for the one case where you mean it.
+ROSTER=$(python3 - "$SIM_STORAGE/$FORK/reverie/meta.json" <<'PY' 2>/dev/null
+import json, sys
+print(",".join(json.load(open(sys.argv[1]))["persona_names"]))
+PY
+)
+if [ -z "$ROSTER" ]; then
+    echo "FATAL: cannot read the roster from $SIM_STORAGE/$FORK/reverie/meta.json"
+    echo "       FORK=$FORK is not a fork in the sim storage directory."
+    exit 1
+fi
+N_AGENTS=$(echo "$ROSTER" | tr ',' '\n' | wc -l | tr -d ' ')
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+git diff --quiet HEAD 2>/dev/null || COMMIT="$COMMIT+dirty"
+META_NOW="fork=$FORK
+roster=$ROSTER
+steps=$STEPS
+temperature=$TEMPERATURE
+commit=$COMMIT"
+META_FILE="$OUT/SWEEP_META"
+if [ -f "$META_FILE" ] && [ "$(cat "$META_FILE")" != "$META_NOW" ]; then
+    echo "FATAL: $OUT was started with different settings:"
+    diff <(cat "$META_FILE") <(echo "$META_NOW") | sed 's/^/       /'
+    if [ "${FORCE_RESUME:-0}" != "1" ]; then
+        echo "       Use a new RUN=<name>, or FORCE_RESUME=1 if you really mean to resume."
+        exit 1
+    fi
+    echo "       FORCE_RESUME=1 set -- continuing anyway."
+fi
+[ "$DRY_RUN" -eq 0 ] && echo "$META_NOW" > "$META_FILE"
 
 # --- preflight --------------------------------------------------------------
 # free_mb <dir> -- available MiB, or empty if df cannot answer.
@@ -166,6 +213,7 @@ CONFIGS_PER_SEED=4
 [ "$RUN_ABLATIONS" -eq 1 ] && CONFIGS_PER_SEED=$(( CONFIGS_PER_SEED + 3 ))
 [ "$RUN_BASECAP" -eq 1 ] && CONFIGS_PER_SEED=$(( CONFIGS_PER_SEED + 1 ))
 echo "[$(date +%T)] plan: ${#SEEDS[@]} seeds x ${CONFIGS_PER_SEED} configs, ${STEPS} steps, temp ${TEMPERATURE}, cap ${MAX_HOURS}h"
+echo "           run $RUN  fork $FORK ($N_AGENTS agents)  code $COMMIT  out $OUT"
 [ "$RUN_ABLATIONS" -eq 1 ] && echo "           + ablation arms (compression / idrag / filter)"
 [ "$RUN_BASECAP" -eq 1 ] && echo "           + baseline-states-risk-cap arm"
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -241,13 +289,13 @@ for s in "${SEEDS[@]}"; do
     echo ""
     echo "=================== SEED $s ==================="
 
-    run "mw_s$s"     trading_reverie.py --fork base_trading --sim run07_mw_s$s \
+    run "mw_s$s"     trading_reverie.py --fork "$FORK" --sim ${RUN}_mw_s$s \
                      --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh   || break
-    run "base_s$s"   trading_reverie.py --fork base_trading --sim run07_base_s$s \
+    run "base_s$s"   trading_reverie.py --fork "$FORK" --sim ${RUN}_base_s$s \
                      --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --no-middleware || break
-    run "pmw_s$s"    paired_eval.py --fork base_trading --sim run07_pmw_s$s \
+    run "pmw_s$s"    paired_eval.py --fork "$FORK" --sim ${RUN}_pmw_s$s \
                      --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --advance-with middleware || break
-    run "pbase_s$s"  paired_eval.py --fork base_trading --sim run07_pbase_s$s \
+    run "pbase_s$s"  paired_eval.py --fork "$FORK" --sim ${RUN}_pbase_s$s \
                      --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --advance-with baseline || break
 
     # --- optional arms -----------------------------------------------------
@@ -259,13 +307,13 @@ for s in "${SEEDS[@]}"; do
         # information and the action interface together, so no effect can be
         # attributed to one of them without these. NOT the middleware: never
         # report an ablation arm's numbers as the system's.
-        run "abl_comp_s$s"   trading_reverie.py --fork base_trading --sim run07_abl_comp_s$s \
+        run "abl_comp_s$s"   trading_reverie.py --fork "$FORK" --sim ${RUN}_abl_comp_s$s \
                              --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh \
                              --components compression || break
-        run "abl_idrag_s$s"  trading_reverie.py --fork base_trading --sim run07_abl_idrag_s$s \
+        run "abl_idrag_s$s"  trading_reverie.py --fork "$FORK" --sim ${RUN}_abl_idrag_s$s \
                              --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh \
                              --components idrag || break
-        run "abl_filter_s$s" trading_reverie.py --fork base_trading --sim run07_abl_filter_s$s \
+        run "abl_filter_s$s" trading_reverie.py --fork "$FORK" --sim ${RUN}_abl_filter_s$s \
                              --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh \
                              --components filter || break
     fi
@@ -275,7 +323,7 @@ for s in "${SEEDS[@]}"; do
         # resized baseline orders were clamped for the risk cap, so some of the
         # baseline's resizing may be it breaking a limit it was never told.
         # This arm separates "did not know" from "ignored it".
-        run "basecap_s$s"    trading_reverie.py --fork base_trading --sim run07_basecap_s$s \
+        run "basecap_s$s"    trading_reverie.py --fork "$FORK" --sim ${RUN}_basecap_s$s \
                              --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh \
                              --no-middleware --baseline-states-risk-cap || break
     fi

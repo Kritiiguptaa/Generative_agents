@@ -13,13 +13,14 @@
 # complete can mark a truncated one complete.
 #
 # Usage, from reverie/backend_server:
-#   ./sweep_status.sh                 # defaults to /workspace/run07
-#   OUT=/workspace/run06 ./sweep_status.sh
+#   ./sweep_status.sh                 # defaults to /workspace/run08
+#   RUN=run07 ./sweep_status.sh       # or OUT=/workspace/run07
 #   ./sweep_status.sh --quiet         # summary counts only
 
 set -u
 
-OUT=${OUT:-/workspace/run07}
+RUN=${RUN:-run08}
+OUT=${OUT:-/workspace/$RUN}
 STAGE=${STAGE:-/tmp/sweep_stage}
 SEEDS=${SEEDS:-"42 43 44 45"}
 
