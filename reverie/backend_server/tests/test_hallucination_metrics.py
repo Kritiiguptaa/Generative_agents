@@ -331,6 +331,51 @@ class HoldCommentaryIsNotDrift(unittest.TestCase):
             PERSONA_DRIFT_THRESHOLD)
 
 
+class WholeWordLanguageMatch(unittest.TestCase):
+    """
+    Regression: the language lists were matched as substrings, so "all in"
+    matched inside "fall in" and "fall indicates", and "panic" matched a
+    description of the market. Three false drift events in the second 100-step
+    nine-agent run, all on HOLDs: Daniel and Priya (conservative) for the word
+    "fall", Kofi (aggressive) for "short-term panic".
+    """
+
+    HOLD = {"action": "hold", "symbol": None, "quantity": 0}
+
+    def test_the_word_fall_is_not_going_all_in(self):
+        cons = _Agent(name="Daniel Reyes", tol="conservative",
+                      watchlist=("AAPL", "GOOGL", "NVDA"))
+        for text in (
+            "NVDA's critical supply bottleneck and deliveries at risk, Tesla's "
+            "vehicle recalls, and the recent fall in GOOGL's price warrant "
+            "careful consideration before making any new trade.",
+            "AMD's recent fall indicates potential weakness, further "
+            "confirmation needed before entering a new position.",
+            "A small investment in AAPL would be tall in stature for this account.",
+        ):
+            self.assertEqual(1.0, score_persona_consistency(text, cons, self.HOLD), text)
+
+    def test_going_all_in_still_flags_with_either_spelling(self):
+        cons = _Agent(name="Daniel Reyes", tol="conservative", watchlist=("AAPL",))
+        for text in ("Going all in on AAPL.", "I am all-in on this one."):
+            self.assertLessEqual(score_persona_consistency(text, cons, self.HOLD),
+                                 PERSONA_DRIFT_THRESHOLD, text)
+
+    def test_describing_market_panic_is_not_the_agents_fear(self):
+        aggr = _Agent(name="Kofi Mensah", tol="aggressive", watchlist=("TSLA", "AMD", "GOOGL"))
+        text = ("Current market volatility presents an opportunity for profits. "
+                "The recent SEC filing of Elon Musk selling Tesla shares may "
+                "cause short-term panic, but Goldman Sachs is bullish.")
+        self.assertEqual(1.0, score_persona_consistency(text, aggr, self.HOLD))
+
+    def test_the_agents_own_fear_still_flags(self):
+        aggr = _Agent(name="Kofi Mensah", tol="aggressive", watchlist=("TSLA",))
+        for text in ("I am terrified of this drop.", "I panic when it falls.",
+                     "TSLA is too risky, I will play it safe."):
+            self.assertLessEqual(score_persona_consistency(text, aggr, self.HOLD),
+                                 PERSONA_DRIFT_THRESHOLD, text)
+
+
 class VenueRejection(unittest.TestCase):
     """
     Regression: execute_order() returns {"status": "rejected"} with no

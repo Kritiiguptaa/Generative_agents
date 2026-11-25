@@ -185,18 +185,47 @@ _LIMIT_REFERENCE_RE = re.compile(
     r"(?:the |my |our |its )?maximum (?:position|leverage)\b")
 
 
+def _phrase_regex(words) -> "re.Pattern":
+    """One regex matching any phrase, only as whole words.
+
+    The lists used to be matched with `phrase in text`, which matches inside
+    other words: "all in" is inside "fall in" and "fall indicates", so a
+    conservative agent writing "the recent fall in GOOGL's price" was scored as
+    going all in (two of the three false drift events in the second 100-step
+    nine-agent run). Longest phrases first so "all-in" is tried before "all".
+    """
+    alts = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+    return re.compile(r"\b(?:" + alts + r")\b")
+
+
 def _has_aggressive_language(reasoning_lower: str) -> bool:
     """True when the reasoning uses an aggressive phrase, ignoring references
     to the agent's own position/leverage limit."""
     text = _LIMIT_REFERENCE_RE.sub(" ", reasoning_lower)
-    return any(w in text for w in _AGGRESSIVE_WORDS)
+    return bool(_AGGRESSIVE_RE.search(text))
 
 
 _FEARFUL_WORDS = frozenset({
     "too risky", "too scared", "avoid everything", "play it safe",
     "too uncertain", "sit this out", "stay on sidelines", "do nothing",
-    "terrified", "panic",
 })
+
+# "terrified" and "panic" count only as the AGENT's own fear. An aggressive
+# trader writing that a selloff "may cause short-term panic" is describing the
+# market, which is exactly what a risk-seeking trader reads as an opportunity
+# (Kofi Mensah, second 100-step run). A first-person marker a few words before
+# the word is the cheap, readable way to tell the two apart.
+_OWN_FEAR_RE = re.compile(
+    r"\b(?:i|i'm|i am|i feel|i'm feeling|i was|we|we're)\b[^.!?;]{0,25}"
+    r"\b(?:terrified|panick\w*|panic)\b")
+
+_AGGRESSIVE_RE = _phrase_regex(_AGGRESSIVE_WORDS)
+_FEARFUL_RE = _phrase_regex(_FEARFUL_WORDS)
+
+
+def _has_fearful_language(reasoning_lower: str) -> bool:
+    """True when the reasoning says the agent itself is scared or avoiding risk."""
+    return bool(_FEARFUL_RE.search(reasoning_lower) or _OWN_FEAR_RE.search(reasoning_lower))
 
 _STALE_SIGNAL_WORDS = frozenset({
     "as mentioned earlier", "as stated before", "previously noted",
@@ -303,7 +332,7 @@ def score_persona_consistency(reasoning: str, persona,
             violations += 1
     elif risk_tolerance == "aggressive":
         checks += 1
-        if any(w in reasoning_lower for w in _FEARFUL_WORDS):
+        if _has_fearful_language(reasoning_lower):
             violations += 1
 
     # 2. Watchlist blindness — acting on a symbol not in the watchlist
