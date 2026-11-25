@@ -48,6 +48,23 @@ n_done=0
 n_trunc=0
 n_missing=0
 n_stranded=0
+n_running=0
+
+# is_running <name> -- is this config's run still alive?
+#
+# A stage log with no copy in $OUT means one of two things: the run is still
+# writing it, or it finished and the copy failed. Reporting both as "stranded"
+# told you a healthy sweep was broken. A live process whose command line names
+# this sim is the real answer; a stage log written in the last few minutes is
+# the fallback for when pgrep is missing or OUT was given without a RUN.
+RUNNING_WITHIN_MIN=${RUNNING_WITHIN_MIN:-3}
+is_running () {
+    local name="$1"
+    if command -v pgrep > /dev/null 2>&1; then
+        pgrep -f -- "--sim ${RUN}_${name}( |\$)" > /dev/null 2>&1 && return 0
+    fi
+    [ -n "$(find "$STAGE/$name.log" -mmin "-$RUNNING_WITHIN_MIN" 2>/dev/null)" ]
+}
 
 # classify <name> -- print one config's state and bump the matching counter.
 #
@@ -78,6 +95,10 @@ classify () {
         state="truncated"
         detail="log present, no report ($(wc -l < "$log") lines)"
         n_trunc=$(( n_trunc + 1 ))
+    elif [ -f "$STAGE/$name.log" ] && is_running "$name"; then
+        state="running"
+        detail="in progress; live log: $STAGE/$name.log"
+        n_running=$(( n_running + 1 ))
     elif [ -f "$STAGE/$name.log" ]; then
         state="stranded"
         detail="finished log still in $STAGE: the run completed, the copy failed"
@@ -113,6 +134,7 @@ done
 
 echo "done      : $n_done"
 echo "incomplete: $n_trunc   (truncated, uncopied, or a .done with no report)"
+echo "running   : $n_running   (a run is still writing its log)"
 echo "stranded  : $n_stranded   (finished, log never copied off local disk)"
 echo "missing   : $n_missing"
 echo ""
@@ -124,7 +146,11 @@ if [ "$n_trunc" -gt 0 ] || [ "$n_stranded" -gt 0 ]; then
     echo "A config marked BAD-DONE will be SKIPPED by a resume; delete its"
     echo ".done file to force it to rerun."
 fi
+if [ "$n_running" -gt 0 ]; then
+    echo "A sweep is still running. Do not start run_sweep.sh again: two sweeps"
+    echo "writing the same sim names corrupt each other's logs."
+fi
 if [ "$n_done" -gt 0 ] && [ "$n_trunc" -eq 0 ] && [ "$n_missing" -eq 0 ] \
-   && [ "$n_stranded" -eq 0 ]; then
+   && [ "$n_stranded" -eq 0 ] && [ "$n_running" -eq 0 ]; then
     echo "All requested configs are complete."
 fi

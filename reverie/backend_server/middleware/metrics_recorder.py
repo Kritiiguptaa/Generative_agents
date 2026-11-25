@@ -165,6 +165,20 @@ def ollama_version(base_url: Optional[str] = None) -> str:
     return version
 
 
+def prime_run_metadata(repo_dir: Optional[str] = None) -> Dict[str, object]:
+    """
+    Read the commit NOW and keep it for the rest of the process.
+
+    git_commit_info() caches on first use, and first use used to be when the
+    report was written, at the END of a run. A checkout made while the run was
+    in flight therefore put the wrong commit on the report: run 07's mw_s43
+    was labelled with code it never ran. Calling this once at run start makes
+    the cached value the start-of-run one, which is the code that produced the
+    decisions. Same dirty flag: edits made later do not change it.
+    """
+    return git_commit_info(repo_dir)
+
+
 def reset_metadata_caches() -> None:
     """
     Forget the cached commit and server version.

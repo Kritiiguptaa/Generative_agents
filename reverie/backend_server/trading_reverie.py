@@ -106,6 +106,7 @@ from middleware.middleware_wrapper import (
 )
 from middleware.metrics_recorder import (
     collect_run_metadata,
+    prime_run_metadata,
     format_meta_lines,
     recorder_from_trading_log,
 )
@@ -1101,6 +1102,11 @@ class TradingReverie:
         log_path = sim_path / "reverie" / "trading_log.json"
         interactions_path = sim_path / "reverie" / "trading_interactions.json"
         log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Record which code this run is, before anything can change it. The
+        # report is written at the end and reads the commit then; without this
+        # a checkout made mid-run labels the results with the wrong code.
+        prime_run_metadata()
 
         # Mark the run live immediately, before the first step even
         # finishes, so a frontend poll landing right after startup sees
