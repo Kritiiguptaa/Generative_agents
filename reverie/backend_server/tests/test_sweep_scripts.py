@@ -23,6 +23,23 @@ sys.path.insert(0, BACKEND)
 HAVE_BASH = shutil.which("bash") is not None
 
 
+def _install_fake_pgrep(shim_dir, procs_file):
+    """
+    A pgrep that reads pretend processes from `procs_file` (one command line per
+    line) instead of the real process table. The real one made these tests depend
+    on what else was running: on the shared DGX another person's sweep matched the
+    script's "a trading_reverie.py is running" guard and failed the suite. The
+    pattern is an ERE matched against the pretend lines, the same semantics the
+    scripts rely on from pgrep -f, so the anchoring (mw_s42 vs mw_s420) is still
+    tested. The last argument is the pattern; -a and -f are accepted and ignored.
+    """
+    _script(os.path.join(shim_dir, "pgrep"),
+            'pat=""; for a in "$@"; do pat="$a"; done\n'
+            f'[ -f "{procs_file}" ] || exit 1\n'
+            f'grep -E -- "$pat" "{procs_file}" && exit 0\n'
+            'exit 1\n')
+
+
 def _script(path, body):
     with open(path, "w") as f:
         f.write("#!/bin/sh\n" + body)
@@ -40,13 +57,10 @@ class SweepStatusRunning(unittest.TestCase):
         self.stage = os.path.join(self.tmp.name, "stage")
         os.makedirs(self.out)
         os.makedirs(self.stage)
-        self.procs = []
-        self.addCleanup(self._kill)
-
-    def _kill(self):
-        for p in self.procs:
-            p.kill()
-            p.wait()
+        self.shim = os.path.join(self.tmp.name, "shim")
+        os.makedirs(self.shim)
+        self.procs_file = os.path.join(self.tmp.name, "procs.txt")
+        _install_fake_pgrep(self.shim, self.procs_file)
 
     def _stage_log(self, name, finished=False):
         path = os.path.join(self.stage, name + ".log")
@@ -54,16 +68,15 @@ class SweepStatusRunning(unittest.TestCase):
             f.write("per-step output\n" + ("HALLUCINATION REPORT\n" if finished else ""))
 
     def _status(self):
-        env = dict(os.environ, OUT=self.out, STAGE=self.stage, RUN="t1", SEEDS="42")
+        env = dict(os.environ, PATH=self.shim + os.pathsep + os.environ["PATH"],
+                   OUT=self.out, STAGE=self.stage, RUN="t1", SEEDS="42")
         r = subprocess.run(["bash", os.path.join(BACKEND, "sweep_status.sh")],
                            capture_output=True, text=True, env=env)
         return r.stdout
 
     def _fake_run(self, sim):
-        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
-                              "--sim", sim, "--steps", "5"])
-        self.procs.append(p)
-        time.sleep(0.3)
+        with open(self.procs_file, "a") as f:
+            f.write(f"4242 python -u trading_reverie.py --fork x --sim {sim} --steps 5\n")
 
     def _line(self, out, name):
         return next(l for l in out.splitlines() if l.strip().startswith(name))
@@ -73,7 +86,6 @@ class SweepStatusRunning(unittest.TestCase):
         self._stage_log("mw_s42", finished=True)
         self.assertIn("stranded", self._line(self._status(), "mw_s42"))
 
-    @unittest.skipUnless(shutil.which("pgrep"), "needs pgrep")
     def test_a_staged_log_with_no_report_and_a_live_process_is_running(self):
         self._stage_log("mw_s42")
         self._fake_run("t1_mw_s42")
@@ -88,7 +100,6 @@ class SweepStatusRunning(unittest.TestCase):
         self.assertIn("killed", self._line(out, "mw_s42"))
         self.assertIn("running   : 0", out)
 
-    @unittest.skipUnless(shutil.which("pgrep"), "needs pgrep")
     def test_a_process_for_a_longer_sim_name_does_not_match(self):
         # mw_s420 is not mw_s42
         self._stage_log("mw_s42")
@@ -175,7 +186,7 @@ class RunSweepEndToEnd(unittest.TestCase):
         self.assertIn("FORCE_RESUME=1 set", r.stdout)
 
 
-@unittest.skipUnless(HAVE_BASH and shutil.which("pgrep"), "needs bash and pgrep")
+@unittest.skipUnless(HAVE_BASH, "needs bash")
 class CompareForksSmoke(unittest.TestCase):
     """compare_forks_smoke.sh with a fake python: one run per fork and seed, no overlap."""
 
@@ -185,6 +196,8 @@ class CompareForksSmoke(unittest.TestCase):
         self.shim = os.path.join(self.tmp.name, "shim")
         os.makedirs(self.shim)
         self.calls = os.path.join(self.tmp.name, "calls.txt")
+        self.procs_file = os.path.join(self.tmp.name, "procs.txt")
+        _install_fake_pgrep(self.shim, self.procs_file)
         _script(os.path.join(self.shim, "python"),
                 f'echo "$@" >> {self.calls}\necho "HALLUCINATION REPORT"\n')
         self.out = os.path.join(self.tmp.name, "cmp")
@@ -210,12 +223,12 @@ class CompareForksSmoke(unittest.TestCase):
         self.assertTrue(all("--steps 3 " in c and "--temperature 0.7 " in c and "--fresh" in c for c in calls))
 
     def test_refuses_to_start_while_a_trading_reverie_process_is_running(self):
-        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "trading_reverie.py"])
-        self.addCleanup(lambda: (p.kill(), p.wait()))
-        time.sleep(0.3)
+        with open(self.procs_file, "w") as f:
+            f.write("30424 python -u trading_reverie.py --fork base_trading --sim run07_base_s42\n")
         r = self._run()
         self.assertEqual(r.returncode, 1)
         self.assertIn("already running", r.stdout)
+        self.assertIn("run07_base_s42", r.stdout)            # names the process in the way
         self.assertFalse(os.path.exists(self.calls))
 
 
