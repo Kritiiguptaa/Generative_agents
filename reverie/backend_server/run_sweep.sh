@@ -39,6 +39,20 @@ read -r -a SEEDS <<< "${SEEDS:-42 43 44 45}"
 MAX_HOURS=${MAX_HOURS:-10}
 RUN=${RUN:-run08}
 FORK=${FORK:-base_trading}
+# Which of the four core configs to run per seed, comma or space separated.
+# mw and base answer "with and without the middleware" on their own; pmw and
+# pbase (paired_eval) add the identical-world-state comparison, and cost about
+# 1.3-1.5x a mw config each. Dropping them roughly halves the sweep.
+ARMS=${ARMS:-mw,base,pmw,pbase}
+ARMS_LIST=$(echo "$ARMS" | tr ',' ' ')
+for a in $ARMS_LIST; do
+    case "$a" in
+        mw|base|pmw|pbase) ;;
+        *) echo "FATAL: unknown arm '$a' in ARMS=$ARMS (use mw, base, pmw, pbase)"; exit 2 ;;
+    esac
+done
+[ -z "$ARMS_LIST" ] && { echo "FATAL: ARMS is empty"; exit 2; }
+arm_on () { case " $ARMS_LIST " in *" $1 "*) return 0 ;; esac; return 1; }
 OUT=${OUT:-/workspace/$RUN}
 # Sampling temperature for the decision call. MUST stay > 0: run 06 swept four
 # seeds at temperature=0, where decoding is greedy and the seed reaches only
@@ -209,11 +223,11 @@ else
 fi
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader 2>/dev/null \
     || echo "WARNING: nvidia-smi unavailable -- check Ollama is not running CPU-only"
-CONFIGS_PER_SEED=4
+CONFIGS_PER_SEED=$(echo $ARMS_LIST | wc -w | tr -d ' ')
 [ "$RUN_ABLATIONS" -eq 1 ] && CONFIGS_PER_SEED=$(( CONFIGS_PER_SEED + 3 ))
 [ "$RUN_BASECAP" -eq 1 ] && CONFIGS_PER_SEED=$(( CONFIGS_PER_SEED + 1 ))
 echo "[$(date +%T)] plan: ${#SEEDS[@]} seeds x ${CONFIGS_PER_SEED} configs, ${STEPS} steps, temp ${TEMPERATURE}, cap ${MAX_HOURS}h"
-echo "           run $RUN  fork $FORK ($N_AGENTS agents)  code $COMMIT  out $OUT"
+echo "           run $RUN  fork $FORK ($N_AGENTS agents)  code $COMMIT  out $OUT  arms: $ARMS_LIST"
 [ "$RUN_ABLATIONS" -eq 1 ] && echo "           + ablation arms (compression / idrag / filter)"
 [ "$RUN_BASECAP" -eq 1 ] && echo "           + baseline-states-risk-cap arm"
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -289,14 +303,22 @@ for s in "${SEEDS[@]}"; do
     echo ""
     echo "=================== SEED $s ==================="
 
-    run "mw_s$s"     trading_reverie.py --fork "$FORK" --sim ${RUN}_mw_s$s \
-                     --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh   || break
-    run "base_s$s"   trading_reverie.py --fork "$FORK" --sim ${RUN}_base_s$s \
-                     --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --no-middleware || break
-    run "pmw_s$s"    paired_eval.py --fork "$FORK" --sim ${RUN}_pmw_s$s \
-                     --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --advance-with middleware || break
-    run "pbase_s$s"  paired_eval.py --fork "$FORK" --sim ${RUN}_pbase_s$s \
-                     --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --advance-with baseline || break
+    if arm_on mw; then
+        run "mw_s$s"     trading_reverie.py --fork "$FORK" --sim ${RUN}_mw_s$s \
+                         --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh   || break
+    fi
+    if arm_on base; then
+        run "base_s$s"   trading_reverie.py --fork "$FORK" --sim ${RUN}_base_s$s \
+                         --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --no-middleware || break
+    fi
+    if arm_on pmw; then
+        run "pmw_s$s"    paired_eval.py --fork "$FORK" --sim ${RUN}_pmw_s$s \
+                         --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --advance-with middleware || break
+    fi
+    if arm_on pbase; then
+        run "pbase_s$s"  paired_eval.py --fork "$FORK" --sim ${RUN}_pbase_s$s \
+                         --steps $STEPS --seed $s --temperature $TEMPERATURE --fresh --advance-with baseline || break
+    fi
 
     # --- optional arms -----------------------------------------------------
     # Appended after the four core configs so that killing the sweep early
@@ -334,10 +356,12 @@ done
 echo ""
 echo "[$(date +%T)] SWEEP ENDED after $(( (SECONDS - START) / 60 )) min"
 echo "configs completed: $(ls "$OUT"/*.done 2>/dev/null | wc -l) / $(( ${#SEEDS[@]} * CONFIGS_PER_SEED ))"
-echo "complete seeds (the 4 core configs):"
+echo "complete seeds (the requested core configs: $ARMS_LIST):"
+N_ARMS=$(echo $ARMS_LIST | wc -w | tr -d ' ')
 for s in "${SEEDS[@]}"; do
-    n=$(ls "$OUT"/{mw,base,pmw,pbase}_s$s.done 2>/dev/null | wc -l)
-    [ "$n" -eq 4 ] && echo "  seed $s  COMPLETE" || echo "  seed $s  partial ($n/4)"
+    n=0
+    for a in $ARMS_LIST; do [ -f "$OUT/${a}_s$s.done" ] && n=$(( n + 1 )); done
+    [ "$n" -eq "$N_ARMS" ] && echo "  seed $s  COMPLETE" || echo "  seed $s  partial ($n/$N_ARMS)"
 done
 # Any log left in the stage never made it across. Said plainly, because a
 # finished run whose log did not copy is recoverable and easy to miss.

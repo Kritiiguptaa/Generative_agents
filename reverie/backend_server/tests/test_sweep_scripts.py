@@ -145,6 +145,30 @@ class RunSweepEndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("was started with different settings", r.stdout)
 
+    def test_arms_limits_which_configs_run(self):
+        r = self._run(ARMS="mw,base")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for name in ("mw_s42", "base_s42"):
+            self.assertTrue(os.path.exists(os.path.join(self.out, name + ".done")), name)
+        for name in ("pmw_s42", "pbase_s42"):
+            self.assertFalse(os.path.exists(os.path.join(self.out, name + ".done")), name)
+        self.assertIn("arms: mw base", r.stdout)
+        self.assertIn("seed 42  COMPLETE", r.stdout)             # complete for the requested arms
+
+    def test_sweep_status_follows_arms_and_does_not_report_skipped_arms_missing(self):
+        self._run(ARMS="mw,base")
+        env = dict(os.environ, OUT=self.out, STAGE=self.stage, RUN="t1", SEEDS="42", ARMS="mw,base")
+        out = subprocess.run(["bash", os.path.join(BACKEND, "sweep_status.sh")],
+                             capture_output=True, text=True, env=env).stdout
+        self.assertIn("All requested configs are complete", out)
+        self.assertNotIn("pmw_s42", out)
+
+    def test_an_unknown_arm_is_refused_before_anything_runs(self):
+        r = self._run(ARMS="mw,nope")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("unknown arm 'nope'", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "mw_s42.done")))
+
     def test_force_resume_overrides_the_guard(self):
         self._run()
         r = self._run(FORK="base_trading", FORCE_RESUME="1")

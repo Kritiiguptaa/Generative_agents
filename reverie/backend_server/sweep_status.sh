@@ -27,7 +27,9 @@ SEEDS=${SEEDS:-"42 43 44 45"}
 # Core configs first, then the optional arms. Listed rather than globbed so a
 # config that was never started is reported as missing instead of being absent
 # from the output, which is the whole point.
-CORE_CONFIGS="mw base pmw pbase"
+# Follows ARMS when it is set (the same variable run_sweep.sh reads), so a sweep
+# run with ARMS=mw,base does not report pmw and pbase as missing.
+CORE_CONFIGS=$(echo "${ARMS:-mw base pmw pbase}" | tr ',' ' ')
 OPTIONAL_CONFIGS="abl_comp abl_idrag abl_filter basecap"
 
 QUIET=0
