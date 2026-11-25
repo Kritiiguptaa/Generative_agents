@@ -140,10 +140,15 @@ is the existing "not scoreable" rule. This beats keyword lists for three reasons
 1. Nothing reads `active_constraints` today. Check that the thresholds are
    present and sensible for all nine personas: Marcus Webb and Sara Kim have no
    `profit_take_threshold`, so for them only the stop-loss rule applies.
-2. The score has to be computed inside the run. `trading_log.json` records cash
-   and portfolio value per decision but not per-position cost basis or prices,
-   so it cannot be reconstructed afterwards. `score_persona_consistency()` would
-   take the prices as an argument, as the harness already passes the order.
+2. It can be computed offline. Each `trading_log.json` entry stores the
+   decision's reasoning, the requested order, the agent's positions with cost
+   basis (`qty`, `avg_price`) and the market prices at that step, so a stop-loss
+   or profit-take breach can be evaluated from the log alone, without a rerun.
+   The same is true of the whole persona score: reasoning, order, and the
+   persona's watchlist and risk tolerance are all recoverable, so a change to the
+   scorer can be applied to a finished sweep as long as its `storage/<sim>/reverie/`
+   folders are kept. (`score_persona_consistency()` would take the prices as an
+   argument, as the harness already passes the order.)
 3. Coverage will be low and should be measured, not assumed. Most agents hold
    cash for most of a run (about 7% of decisions were trades), so rules trigger
    rarely. The honest outcome may be a small but objective set of scored holds,
