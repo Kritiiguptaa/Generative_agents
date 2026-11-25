@@ -20,6 +20,7 @@ Description: Persona anchoring middleware for the trading simulation.
        Logged per step alongside the hallucination and stale-context flags.
 """
 
+import re
 from typing import Optional
 
 
@@ -167,6 +168,30 @@ _AGGRESSIVE_WORDS = frozenset({
     "full position", "maximum leverage",
 })
 
+# "maximum position" / "maximum leverage" are aggressive intent when an agent
+# says it will take one ("go to maximum position") and plain risk-management
+# vocabulary when it cites its own limit ("within the maximum position limit").
+# Matched as bare substrings they flagged the second use, and a conservative
+# agent cites its limit all the time: the first nine-agent smoke run (smoke9_mw) scored
+# a conservative HOLD 0.50 for "AAPL and GOOGL are already within the maximum
+# position limit". Phrases that refer to the limit are blanked out before the
+# aggressive-word match, so only an unqualified use still counts.
+# shortcut: "maximum position size" is still flagged -- it is as likely to be
+# intent ("take maximum position size") as a limit, and a wrong guess either
+# way is worse than leaving the phrase out of this list.
+_LIMIT_REFERENCE_RE = re.compile(
+    r"\bmaximum (?:position|leverage)\s+(?:limit|cap|threshold|allowed|allowance)\b"
+    r"|\b(?:within|under|below|near|exceeds?|exceeding|over)\s+"
+    r"(?:the |my |our |its )?maximum (?:position|leverage)\b")
+
+
+def _has_aggressive_language(reasoning_lower: str) -> bool:
+    """True when the reasoning uses an aggressive phrase, ignoring references
+    to the agent's own position/leverage limit."""
+    text = _LIMIT_REFERENCE_RE.sub(" ", reasoning_lower)
+    return any(w in text for w in _AGGRESSIVE_WORDS)
+
+
 _FEARFUL_WORDS = frozenset({
     "too risky", "too scared", "avoid everything", "play it safe",
     "too uncertain", "sit this out", "stay on sidelines", "do nothing",
@@ -272,7 +297,7 @@ def score_persona_consistency(reasoning: str, persona,
         pass
     elif risk_tolerance == "conservative":
         checks += 1
-        if any(w in reasoning_lower for w in _AGGRESSIVE_WORDS):
+        if _has_aggressive_language(reasoning_lower):
             violations += 1
     elif risk_tolerance == "aggressive":
         checks += 1

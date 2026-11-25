@@ -241,6 +241,46 @@ class PersonaWatchlistCheck(unittest.TestCase):
         self.assertFalse(hold_rate_drift(1.0, _Agent(tol="moderate", watchlist=("NVDA",))))
 
 
+class ConservativeLimitLanguage(unittest.TestCase):
+    """
+    Regression: "maximum position" is on the aggressive-word list, so a
+    conservative agent citing its own limit ("within the maximum position
+    limit") was scored as drifting. The first nine-agent smoke run (smoke9_mw) scored
+    Daniel Reyes 0.50 on exactly that sentence.
+    """
+
+    def setUp(self):
+        self.agent = _Agent(name="Daniel Reyes", tol="conservative",
+                            watchlist=("AAPL", "GOOGL", "NVDA"))
+
+    def test_citing_the_position_limit_is_not_drift(self):
+        for text in (
+            "AAPL and GOOGL are already within the maximum position limit.",
+            "I am at the maximum position limit for GOOGL, so I hold.",
+            "NVDA is under the maximum position allowed by my policy.",
+            "That would exceed the maximum leverage cap, so I will wait.",
+        ):
+            self.assertEqual(1.0, score_persona_consistency(text, self.agent), text)
+
+    def test_the_smoke9_sentence_scores_in_character(self):
+        text = ("Maintain current positions as per the strategy. NVDA's recent "
+                "fall requires volume confirmation before considering a purchase. "
+                "AAPL and GOOGL are already within the maximum position limit, "
+                "and the current portfolio value is already close to the maximum "
+                "value for a single trade.")
+        self.assertEqual(1.0, score_persona_consistency(text, self.agent))
+
+    def test_real_aggressive_intent_still_flags(self):
+        for text in (
+            "Time to go to maximum position in NVDA.",
+            "Going all-in on GOOGL.",
+            "This is a massive opportunity, go big on AAPL.",
+            "I will take maximum leverage here.",
+        ):
+            self.assertLessEqual(score_persona_consistency(text, self.agent),
+                                 PERSONA_DRIFT_THRESHOLD, text)
+
+
 class VenueRejection(unittest.TestCase):
     """
     Regression: execute_order() returns {"status": "rejected"} with no
