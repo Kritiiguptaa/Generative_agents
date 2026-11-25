@@ -222,7 +222,7 @@ def _run_harness(kind: str) -> tuple:
             from trading_reverie import TradingReverie
             sim = TradingReverie(
                 sim_code=sim_code,
-                fork_sim_code="base_trading",
+                fork_sim_code="base_trading_3agent",
                 use_middleware=True,
                 fresh=True,
                 seed=PARITY_SEED,
@@ -232,7 +232,7 @@ def _run_harness(kind: str) -> tuple:
             from paired_eval import PairedEvaluation
             sim = PairedEvaluation(
                 sim_code=sim_code,
-                fork_sim_code="base_trading",
+                fork_sim_code="base_trading_3agent",
                 use_middleware=True,
                 fresh=True,
                 seed=PARITY_SEED,

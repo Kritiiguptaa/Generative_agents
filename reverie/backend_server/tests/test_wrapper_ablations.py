@@ -171,7 +171,7 @@ class AblationArmTest(unittest.TestCase):
         from trading_reverie import TradingReverie
         cls.sim = TradingReverie(
             sim_code=ABLATION_SIM,
-            fork_sim_code="base_trading",
+            fork_sim_code="base_trading_3agent",
             use_middleware=True,
             fresh=True,
             seed=42,

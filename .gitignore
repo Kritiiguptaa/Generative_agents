@@ -9,6 +9,8 @@ static_dirs/*
 
 !environment/frontend_server/storage/base_trading/
 !environment/frontend_server/storage/base_trading/**
+!environment/frontend_server/storage/base_trading_3agent/
+!environment/frontend_server/storage/base_trading_3agent/**
 
 !environment/frontend_server/storage/base_trading_the_ville/
 !environment/frontend_server/storage/base_trading_the_ville/**

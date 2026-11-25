@@ -9,7 +9,7 @@ Reasoning about an inheritance refactor is not enough: run 06's defect 2 was a
 harness that looked correct and diverged at the first decision.
 
 So this file pins what the pipeline does *today*. It runs the real
-TradingReverie over the real base_trading fork for a fixed number of steps,
+TradingReverie over the frozen base_trading_3agent fork for a fixed number of steps,
 with every network call replaced by a deterministic stub, and snapshots the
 result. After the refactor the snapshot must match byte for byte.
 
@@ -366,8 +366,10 @@ def run_pipeline_snapshot(use_middleware: bool,
     """
     Run one arm end to end against the stub and return a comparable snapshot.
 
-    Uses the real TradingReverie and the real base_trading fork, because a
-    hand-built fake pipeline would not catch a refactor that breaks the wiring
+    Uses the real TradingReverie and the frozen three-agent fork
+    base_trading_3agent (base_trading is now the nine-agent sweep roster, which
+    the golden files were not recorded against), because a hand-built fake
+    pipeline would not catch a refactor that breaks the wiring
     between the real pieces, which is the only failure mode worth testing for.
 
     The simulation writes into the shared storage directory like a real run, so
@@ -398,7 +400,7 @@ def run_pipeline_snapshot(use_middleware: bool,
 
         sim = TradingReverie(
             sim_code=sim_code,
-            fork_sim_code="base_trading",
+            fork_sim_code="base_trading_3agent",
             use_middleware=use_middleware,
             fresh=True,
             seed=seed,
@@ -457,7 +459,7 @@ def run_log_and_report(use_middleware: bool,
 
         sim = TradingReverie(
             sim_code=sim_code,
-            fork_sim_code="base_trading",
+            fork_sim_code="base_trading_3agent",
             use_middleware=use_middleware,
             fresh=True,
             seed=seed,
