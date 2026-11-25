@@ -67,6 +67,12 @@ from trading_reverie import (
 # composed by MiddlewareWrapper.decide(), so this harness cannot assemble a
 # different pipeline from the runner's.
 from middleware.action_filtering import is_trade_request
+from middleware.persona_anchoring import (
+    score_persona_consistency,
+    strategy_exits_due,
+    can_buy,
+    hold_rate_drift,
+)
 from middleware.middleware_wrapper import MiddlewareWrapper
 from middleware.metrics_recorder import (
     collect_run_metadata,
@@ -251,6 +257,12 @@ class PairedEvaluation(TradingReverie):
               f"x{bs_d.get('quantity')}"
               f"{'  INFEASIBLE' if both['baseline']['score']['infeasible'] else ''}")
 
+        # Persona state BEFORE the driving arm trades. Both arms are scored
+        # against it: taken afterwards, the arm that did not advance the world
+        # would be judged on the other arm's trade.
+        exits_due = strategy_exits_due(persona, self.market.current_prices)
+        could_buy = can_buy(persona, self.market)
+
         # Only the driving arm mutates the world.
         driver = both["middleware"] if self.advance_with == "middleware" else both["baseline"]
         decision = driver["decision"]
@@ -287,6 +299,7 @@ class PairedEvaluation(TradingReverie):
             "portfolio_value_before": pv_before,
             "cash": round(persona.scratch.cash_balance, 2),
             "market_prices": dict(self.market.current_prices),
+            "could_buy": could_buy,
         }
         for arm in ("middleware", "baseline"):
             side = both[arm]
@@ -307,6 +320,9 @@ class PairedEvaluation(TradingReverie):
                     reasoning, step, self.market.SCRIPTED_NEWS),
                 "state_contradiction": check_state_grounding(
                     reasoning, persona, self.market),
+                "persona_score": score_persona_consistency(
+                    reasoning, persona, side["stats"].get("requested") or {},
+                    exits_due),
             }
         self.pairs.append(pair)
         log.append(pair)
@@ -350,6 +366,21 @@ class PairedEvaluation(TradingReverie):
             stale = arm_summary["stale_context_hits"]["count"]
             contra = arm_summary["state_contradictions"]["count"]
             holds = arm_summary["abstention"]["count"]
+            persona_m = arm_summary["persona_consistency"]
+            # HOLD rate over the steps where a BUY was legal, per agent. Both
+            # arms see the same states, so this is the like-for-like test of
+            # whether one arm makes an agent hold where it could have traded.
+            hold_drift_agents = []
+            able, able_holds = 0, 0
+            for a in agents:
+                rows = [p for p in self.pairs
+                        if p["agent"] == a and p.get("could_buy")]
+                n_hold = sum(1 for p in rows if p[arm]["action"] == "hold")
+                able += len(rows)
+                able_holds += n_hold
+                if hold_rate_drift(n_hold / len(rows) if rows else None,
+                                   self.personas[a]):
+                    hold_drift_agents.append(a)
             traders = set(agents) - set(
                 arm_summary["participation"]["non_participants"])
             per_agent_eps = 0
@@ -387,6 +418,12 @@ class PairedEvaluation(TradingReverie):
                                                  if reasoned else None),
                 "kinds": dict(Counter(p[arm]["kind"] for p in self.pairs
                                       if p[arm]["kind"])),
+                "avg_persona_consistency": persona_m["average"],
+                "persona_drift_events": persona_m["drift_events"],
+                "persona_scored": persona_m["denominator"],
+                "hold_when_able_pct": (round(able_holds / able * 100, 1)
+                                       if able else None),
+                "persona_hold_drift_agents": hold_drift_agents,
                 "avg_context_chars": (round(sum(p[arm]["context_chars"]
                                                 for p in self.pairs) / len(self.pairs))
                                       if self.pairs else 0),
@@ -448,11 +485,19 @@ class PairedEvaluation(TradingReverie):
             ("stale context hits", "stale_context_hits"),
             ("state contradictions", "state_contradictions"),
             ("avg context chars", "avg_context_chars"),
+            ("persona consistency avg", "avg_persona_consistency"),
+            ("persona drift events", "persona_drift_events"),
+            ("hold % when able to buy", "hold_when_able_pct"),
         ]
         for label, key in rows:
             mw = report["middleware"][key]
             bs = report["baseline"][key]
             print(f"{label:<28}{str(mw):>14}{str(bs):>14}")
+        for arm in ("middleware", "baseline"):
+            flagged = report[arm]["persona_hold_drift_agents"]
+            if flagged:
+                print(f"PERSONA DRIFT ({arm}): {', '.join(flagged)} -- aggressive "
+                      f"profile, held most of the steps it could buy")
         c = report["paired_contingency"]
         print(f"\nDiscordant pairs (the informative ones):")
         print(f"  middleware infeasible, baseline fine : {c['middleware_only']}")

@@ -31,7 +31,7 @@ def _script(path, body):
 
 @unittest.skipUnless(HAVE_BASH, "needs bash")
 class SweepStatusRunning(unittest.TestCase):
-    """A stage log with no copy is 'running' while the run is alive, 'stranded' after."""
+    """A staged log with no copy: stranded if it holds a report, running if a process has it, else killed."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -48,12 +48,10 @@ class SweepStatusRunning(unittest.TestCase):
             p.kill()
             p.wait()
 
-    def _stage_log(self, name, age_s):
+    def _stage_log(self, name, finished=False):
         path = os.path.join(self.stage, name + ".log")
         with open(path, "w") as f:
-            f.write("partial\n")
-        t = time.time() - age_s
-        os.utime(path, (t, t))
+            f.write("per-step output\n" + ("HALLUCINATION REPORT\n" if finished else ""))
 
     def _status(self):
         env = dict(os.environ, OUT=self.out, STAGE=self.stage, RUN="t1", SEEDS="42")
@@ -70,31 +68,32 @@ class SweepStatusRunning(unittest.TestCase):
     def _line(self, out, name):
         return next(l for l in out.splitlines() if l.strip().startswith(name))
 
-    def test_a_freshly_written_stage_log_is_running(self):
-        self._stage_log("mw_s42", age_s=5)
+    def test_a_staged_log_with_a_report_is_stranded(self):
+        # the run finished and wrote its report; only the copy to OUT failed
+        self._stage_log("mw_s42", finished=True)
+        self.assertIn("stranded", self._line(self._status(), "mw_s42"))
+
+    @unittest.skipUnless(shutil.which("pgrep"), "needs pgrep")
+    def test_a_staged_log_with_no_report_and_a_live_process_is_running(self):
+        self._stage_log("mw_s42")
+        self._fake_run("t1_mw_s42")
         out = self._status()
         self.assertIn("running", self._line(out, "mw_s42"))
         self.assertIn("running   : 1", out)
         self.assertIn("Do not start run_sweep.sh again", out)
 
-    def test_an_old_stage_log_with_no_process_is_stranded(self):
-        self._stage_log("mw_s42", age_s=3600)
+    def test_a_staged_log_with_no_report_and_no_process_is_killed(self):
+        self._stage_log("mw_s42")
         out = self._status()
-        self.assertIn("stranded", self._line(out, "mw_s42"))
+        self.assertIn("killed", self._line(out, "mw_s42"))
         self.assertIn("running   : 0", out)
-
-    @unittest.skipUnless(shutil.which("pgrep"), "needs pgrep")
-    def test_a_live_process_for_the_sim_is_running_even_with_a_quiet_log(self):
-        self._stage_log("mw_s42", age_s=3600)
-        self._fake_run("t1_mw_s42")
-        self.assertIn("running", self._line(self._status(), "mw_s42"))
 
     @unittest.skipUnless(shutil.which("pgrep"), "needs pgrep")
     def test_a_process_for_a_longer_sim_name_does_not_match(self):
         # mw_s420 is not mw_s42
-        self._stage_log("mw_s42", age_s=3600)
+        self._stage_log("mw_s42")
         self._fake_run("t1_mw_s420")
-        self.assertIn("stranded", self._line(self._status(), "mw_s42"))
+        self.assertIn("killed", self._line(self._status(), "mw_s42"))
 
 
 @unittest.skipUnless(HAVE_BASH, "needs bash")
@@ -125,7 +124,7 @@ class RunSweepEndToEnd(unittest.TestCase):
     def test_start_lines_say_where_to_watch_and_configs_are_marked_done(self):
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn(f"START mw_s42  (live log: {self.stage}/mw_s42.log)", r.stdout)
+        self.assertIn(f"START mw_s42   (live: tail -f {self.stage}/mw_s42.log)", r.stdout)
         for name in ("mw_s42", "base_s42", "pmw_s42", "pbase_s42"):
             self.assertTrue(os.path.exists(os.path.join(self.out, name + ".done")), name)
 
@@ -219,53 +218,6 @@ class CompareForksSmoke(unittest.TestCase):
         self.assertIn("already running", r.stdout)
         self.assertFalse(os.path.exists(self.calls))
 
-
-class CommitRecordedAtRunStart(unittest.TestCase):
-    """A checkout made mid-run must not change the commit the report records."""
-
-    def setUp(self):
-        from middleware import metrics_recorder as m
-        self.m = m
-        m.reset_metadata_caches()
-        self.addCleanup(m.reset_metadata_caches)
-
-    @staticmethod
-    def _git_says(commit):
-        def fake(args, **kw):
-            out = commit if args[1] == "rev-parse" else ""
-            return subprocess.CompletedProcess(args, 0, stdout=out + "\n", stderr="")
-        return mock.patch("middleware.metrics_recorder.subprocess.run", side_effect=fake)
-
-    def test_the_commit_read_at_start_survives_a_later_checkout(self):
-        with self._git_says("aaaaaaa"):
-            self.m.prime_run_metadata()
-        with self._git_says("bbbbbbb"):                      # someone checked out mid-run
-            self.assertEqual(self.m.git_commit_info()["git_commit"], "aaaaaaa")
-            self.assertEqual(self.m.collect_run_metadata(include_ollama_version=False)["git_commit"],
-                             "aaaaaaa")
-
-    def test_without_priming_the_commit_is_read_late(self):
-        # The old behaviour this guards against: first use, at report time.
-        with self._git_says("bbbbbbb"):
-            self.assertEqual(self.m.git_commit_info()["git_commit"], "bbbbbbb")
-
-    def test_run_primes_the_commit_before_the_first_step(self):
-        # Source-structure check: the call must precede the step loop in
-        # TradingReverie.run. PairedEvaluation inherits run(), so this covers both.
-        with open(os.path.join(BACKEND, "trading_reverie.py")) as f:
-            tree = ast.parse(f.read())
-        run = next(n for c in tree.body if isinstance(c, ast.ClassDef) and c.name == "TradingReverie"
-                   for n in c.body if isinstance(n, ast.FunctionDef) and n.name == "run")
-        prime = loop = None
-        for node in ast.walk(run):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "prime_run_metadata":
-                prime = node.lineno if prime is None else min(prime, node.lineno)
-            if isinstance(node, ast.For) and loop is None:
-                loop = node.lineno
-        self.assertIsNotNone(prime, "run() never calls prime_run_metadata()")
-        self.assertLess(prime, loop, "the commit must be read before the step loop starts")
-        with open(os.path.join(BACKEND, "paired_eval.py")) as f:
-            self.assertNotIn("def run(", f.read(), "paired_eval overrides run(); prime it there too")
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ from trading_reverie import (refresh_currently, check_state_grounding,
 from middleware.action_filtering import (get_legal_actions, build_prompt,
                                          _get_spendable_budget)
 from middleware.persona_anchoring import (score_persona_consistency, hold_rate_drift,
+                                          strategy_exits_due,
                                           PERSONA_DRIFT_THRESHOLD)
 
 
@@ -239,6 +240,52 @@ class PersonaWatchlistCheck(unittest.TestCase):
 
     def test_moderate_agent_holding_all_run_is_not_drift(self):
         self.assertFalse(hold_rate_drift(1.0, _Agent(tol="moderate", watchlist=("NVDA",))))
+
+    def test_never_able_to_buy_is_not_drift(self):
+        # Fully invested all run: holding is the only option, not a choice.
+        self.assertFalse(hold_rate_drift(None, self.agent))
+
+
+class StrategyExitRules(unittest.TestCase):
+    """
+    The agent's own stop-loss / take-profit, scored against what it did.
+
+    Alex Chen's strategy says "cut losers at 8% loss without exception" and
+    "trim winners at 15% gain"; nothing scored either before.
+    """
+
+    def setUp(self):
+        self.agent = _Agent(tol="moderate", watchlist=("NVDA", "AAPL"),
+                            positions={"NVDA": {"qty": 10, "avg_price": 100.0},
+                                       "AAPL": {"qty": 5, "avg_price": 100.0}})
+        self.agent.scratch.stop_loss_pct = 0.08
+        self.agent.scratch.take_profit_pct = 0.15
+
+    def test_breached_stop_and_target_are_due(self):
+        due = strategy_exits_due(self.agent, {"NVDA": 91.0, "AAPL": 116.0})
+        self.assertEqual({"NVDA", "AAPL"}, due)
+
+    def test_inside_the_band_nothing_is_due(self):
+        self.assertEqual(set(), strategy_exits_due(
+            self.agent, {"NVDA": 93.0, "AAPL": 114.0}))
+
+    def test_persona_without_rules_has_nothing_due(self):
+        agent = _Agent(positions={"NVDA": {"qty": 10, "avg_price": 100.0}})
+        self.assertEqual(set(), strategy_exits_due(agent, {"NVDA": 50.0}))
+
+    def test_holding_through_a_due_stop_is_drift(self):
+        score = score_persona_consistency(
+            "Waiting for a rebound.", self.agent, {"action": "hold"}, {"NVDA"})
+        self.assertLessEqual(score, PERSONA_DRIFT_THRESHOLD)
+
+    def test_selling_the_due_symbol_is_in_character(self):
+        self.assertEqual(1.0, score_persona_consistency(
+            "", self.agent, {"action": "sell", "symbol": "NVDA"}, {"NVDA"}))
+
+    def test_selling_a_different_symbol_does_not_satisfy_the_rule(self):
+        score = score_persona_consistency(
+            "", self.agent, {"action": "sell", "symbol": "AAPL"}, {"NVDA"})
+        self.assertEqual(0.0, score)
 
 
 class ConservativeLimitLanguage(unittest.TestCase):

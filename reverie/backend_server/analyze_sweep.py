@@ -73,6 +73,7 @@ PATTERNS = {
     "persona": re.compile(r"Persona consistency\s+:\s+avg=(\S+)\s+drift events=(\d+)\s+\(scored (\d+)\)"),
     "actions": re.compile(r"Actions\s+:\s+buy=(\d+)\s+sell=(\d+)\s+hold=(\d+)\s+analyze=(\d+)"),
     "hold": re.compile(r"Abstention\s+:\s+" + NUM + r"% HOLD(.*)$"),
+    "able": re.compile(r"Hold when able\s+:\s+" + NUM + r"%"),
     "pnl": re.compile(r"Portfolio PnL\s+:\s+\$([+-]?[\d,]+(?:\.\d+)?)\s+\(\$([\d,]+) -> \$([\d,]+)\)"),
 }
 
@@ -112,6 +113,8 @@ def parse_log(text):
                                    drift=int(g[2]), scored=int(g[3]))
                     elif key == "actions":
                         row.update(buy=int(g[1]), sell=int(g[2]), hold=int(g[3]), analyze=int(g[4]))
+                    elif key == "able":
+                        row["hold_able"] = _f(g[1])
                     elif key == "hold":
                         row.update(hold_pct=_f(g[1]), hold_drift="PERSONA DRIFT" in g[2])
                     elif key == "pnl":
@@ -188,6 +191,8 @@ PAIRED_ROWS = {
     "abstention %": "abstention_pct", "participating agents": "participants",
     "stale context hits": "stale", "state contradictions": "contradictions",
     "avg context chars": "ctx_chars",
+    "persona consistency avg": "persona_avg", "persona drift events": "persona_drift",
+    "hold % when able to buy": "hold_able_pct",
 }
 PAIRED_CONTINGENCY = {
     "middleware infeasible, baseline fine": "mw_only",
@@ -263,7 +268,7 @@ def paired_section(paired):
         adv = rs[0].get("advanced_with", "?")
         out.append(f"\n{arm}  (world advanced with {adv})")
         out.append(f"  {'seed':<6}{'pairs':>7}{'attempts mw / base':>20}{'infeasible % mw / base':>26}"
-                   f"{'mw-only':>9}{'base-only':>11}   reading")
+                   f"{'hold-when-able % mw / base':>28}{'mw-only':>9}{'base-only':>11}   reading")
         better = worse = tie = 0
         for r in rs:
             c = r["cont"]
@@ -277,6 +282,7 @@ def paired_section(paired):
             out.append(f"  {r['seed']:<6}{r.get('pairs', 0):>7}"
                        f"{f(r['mw'].get('attempts')) + ' / ' + f(r['base'].get('attempts')):>20}"
                        f"{f(r['mw'].get('infeasible_pct')) + ' / ' + f(r['base'].get('infeasible_pct')):>26}"
+                       f"{f(r['mw'].get('hold_able_pct')) + ' / ' + f(r['base'].get('hold_able_pct')):>28}"
                        f"{c['mw_only']:>9}{c['base_only']:>11}   {reading}")
         mo = sum(r["cont"]["mw_only"] for r in rs)
         bo = sum(r["cont"]["base_only"] for r in rs)
@@ -337,8 +343,10 @@ def rescore_entries(entries, personas):
     """
     Recompute persona numbers per agent from trading_log entries with the current
     scorer, the way the harness aggregates them: the score of each decision is
-    score_persona_consistency(reasoning, persona, requested); None is not averaged
-    in; a drift event is a score at or under the threshold.
+    score_persona_consistency(reasoning, persona, requested, exits_due); None is not
+    averaged in; a drift event is a score at or under the threshold. exits_due comes
+    from the entry's own "exits_due" field; logs written before that field existed
+    have none, so their exit-rule dimension is simply not evaluated.
     """
     if score_persona_consistency is None:
         raise RuntimeError("the persona scorer could not be imported")
@@ -349,7 +357,8 @@ def rescore_entries(entries, personas):
             continue
         s = score_persona_consistency((e.get("decision") or {}).get("reasoning", ""),
                                       _Persona(info["risk_tolerance"], info["watchlist"]),
-                                      e.get("requested") or {})
+                                      e.get("requested") or {},
+                                      set(e.get("exits_due") or []))
         if s is not None:
             scores[e["agent"]].append(s)
     return {a: dict(persona=round(sum(v) / len(v), 2) if v else None,
@@ -404,6 +413,8 @@ def seed_bucket_metrics(rows):
             agents=len(rs),
             hold=statistics.mean(r["hold_pct"] for r in rs if "hold_pct" in r)
             if any("hold_pct" in r for r in rs) else None,
+            hold_able=(statistics.mean(r["hold_able"] for r in rs if "hold_able" in r)
+                       if any("hold_able" in r for r in rs) else None),
             halluc=_rate(sum(r["halluc"] for r in rs), sum(r["attempts"] for r in rs)),
             attempts=sum(r["attempts"] for r in rs),
             contra=_rate(sum(r.get("contra", 0) for r in rs), sum(r.get("reasoned", 0) for r in rs)),
@@ -417,7 +428,7 @@ def seed_bucket_metrics(rows):
     return res
 
 
-METRICS = (("hold", "hold %"), ("halluc", "halluc % of attempts"),
+METRICS = (("hold", "hold %"), ("hold_able", "hold % when able"), ("halluc", "halluc % of attempts"),
            ("contra", "state-contra %"), ("persona", "persona avg"),
            ("drift_per100", "drift ev/100 dec"), ("pnl_pct", "PnL %"))
 

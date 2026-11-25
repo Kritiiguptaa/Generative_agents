@@ -104,5 +104,7 @@
     "GOOGL"
   ],
   "pnl_today": 0.0,
-  "pnl_total": 0.0
+  "pnl_total": 0.0,
+  "stop_loss_pct": 0.04,
+  "take_profit_pct": 0.08
 }

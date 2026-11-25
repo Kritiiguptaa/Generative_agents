@@ -142,6 +142,14 @@ def git_commit_info(repo_dir: Optional[str] = None) -> Dict[str, object]:
     return info
 
 
+# Read the commit when the process STARTS, not when the report is written.
+# Python has already loaded the code by then, so a `git checkout` during a run
+# would label old code with the new hash. That happened: a run 07 config
+# finished after a mid-sweep checkout and reported 4c79fa4 while running
+# 7511018. The cache above keeps this first answer for the process's lifetime.
+git_commit_info()
+
+
 def ollama_version(base_url: Optional[str] = None) -> str:
     """
     The Ollama server's reported version, or UNKNOWN if it cannot be asked.
@@ -163,20 +171,6 @@ def ollama_version(base_url: Optional[str] = None) -> str:
         version = UNKNOWN
     _ollama_version_cache[key] = version
     return version
-
-
-def prime_run_metadata(repo_dir: Optional[str] = None) -> Dict[str, object]:
-    """
-    Read the commit NOW and keep it for the rest of the process.
-
-    git_commit_info() caches on first use, and first use used to be when the
-    report was written, at the END of a run. A checkout made while the run was
-    in flight therefore put the wrong commit on the report: run 07's mw_s43
-    was labelled with code it never ran. Calling this once at run start makes
-    the cached value the start-of-run one, which is the code that produced the
-    decisions. Same dirty flag: edits made later do not change it.
-    """
-    return git_commit_info(repo_dir)
 
 
 def reset_metadata_caches() -> None:
@@ -408,6 +402,7 @@ class MetricsRecorder:
         self.register_metric("participation", _metric_participation)
         self.register_metric("stale_context_hits", _metric_stale)
         self.register_metric("state_contradictions", _metric_contradictions)
+        self.register_metric("persona_consistency", _metric_persona)
 
     def summary(self) -> Dict[str, object]:
         """
@@ -696,6 +691,7 @@ def recorder_from_pairs(pairs: list, arm: str,
             has_reasoning=bool(side.get("has_reasoning")),
             stale_context=bool(side.get("stale_context")),
             state_contradiction=bool(side.get("state_contradiction")),
+            persona_score=side.get("persona_score"),
         )
     return recorder
 
@@ -845,6 +841,21 @@ def _metric_participation(events):
     traders = {r["agent"] for r in _requests(events)}
     return {"count": len(traders), "denominator": len(agents),
             "non_participants": sorted(agents - traders)}
+
+
+def _metric_persona(events):
+    """
+    Persona consistency over the decisions that were scoreable.
+
+    None scores (nothing to check) are excluded rather than counted as clean,
+    for the reason documented on score_persona_consistency().
+    """
+    from middleware.persona_anchoring import PERSONA_DRIFT_THRESHOLD
+    scores = [e["persona_score"] for e in events
+              if e["type"] == EVENT_CONTEXT and e.get("persona_score") is not None]
+    return {"average": round(sum(scores) / len(scores), 2) if scores else None,
+            "drift_events": sum(1 for x in scores if x <= PERSONA_DRIFT_THRESHOLD),
+            "denominator": len(scores)}
 
 
 def _metric_stale(events):

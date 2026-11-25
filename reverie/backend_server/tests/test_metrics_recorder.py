@@ -349,6 +349,22 @@ class MetadataTest(unittest.TestCase):
         self.assertTrue(info["git_commit"] == UNKNOWN
                         or len(str(info["git_commit"])) >= 7)
 
+    def test_commit_is_read_at_import_not_at_report_time(self):
+        """
+        A checkout during a run must not relabel the code already loaded.
+
+        Checked in a fresh interpreter because this process's cache has been
+        reset by other tests; the cache being filled by import alone is what
+        pins the hash to process start.
+        """
+        import subprocess
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import middleware.metrics_recorder as m; print(bool(m._git_cache))"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual("True", out.stdout.strip(), out.stderr)
+
     def test_an_unreachable_ollama_reports_not_found(self):
         """
         No server must give NOT FOUND, never a guess and never a crash.

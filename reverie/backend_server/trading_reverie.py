@@ -89,6 +89,8 @@ from middleware.persona_anchoring   import (
     score_persona_consistency,
     PERSONA_DRIFT_THRESHOLD,
     hold_rate_drift,
+    strategy_exits_due,
+    can_buy,
 )
 from middleware.id_rag import (
     # id_rag_anchor is deliberately NOT imported here. The input-side steps are
@@ -106,7 +108,6 @@ from middleware.middleware_wrapper import (
 )
 from middleware.metrics_recorder import (
     collect_run_metadata,
-    prime_run_metadata,
     format_meta_lines,
     recorder_from_trading_log,
 )
@@ -1103,11 +1104,6 @@ class TradingReverie:
         interactions_path = sim_path / "reverie" / "trading_interactions.json"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Record which code this run is, before anything can change it. The
-        # report is written at the end and reads the commit then; without this
-        # a checkout made mid-run labels the results with the wrong code.
-        prime_run_metadata()
-
         # Mark the run live immediately, before the first step even
         # finishes, so a frontend poll landing right after startup sees
         # sim_running=True instead of a stale/absent flag.
@@ -1279,6 +1275,11 @@ class TradingReverie:
                   f"stale={mc_stats['dropped_stale']} "
                   f"budget={mc_stats['dropped_budget']})")
 
+        # Persona state BEFORE the trade: a compliant stop-loss sale removes
+        # the position, so measured afterwards the rule would look never due.
+        exits_due  = strategy_exits_due(persona, self.market.current_prices)
+        could_buy  = can_buy(persona, self.market)
+
         # 6. Execute (with action filtering)
         result = execute_trading_action(persona, self.market, decision)
         outcome = result["outcome_str"]
@@ -1361,7 +1362,8 @@ class TradingReverie:
         # the agent TRIED to buy counts even when the filter blocked it.
         # None means "not scoreable" (no reasoning and no trade request), which
         # is distinct from "scored badly" and must not be averaged in as either.
-        drift_score = score_persona_consistency(reasoning, persona, req)
+        drift_score = score_persona_consistency(reasoning, persona, req,
+                                                exits_due)
         if drift_score is not None and drift_score <= PERSONA_DRIFT_THRESHOLD:
             print(f"  [{name}] *** PERSONA DRIFT *** consistency score "
                   f"{drift_score:.2f} (reasoning may contradict agent profile)")
@@ -1397,6 +1399,13 @@ class TradingReverie:
             # Recorded per step so the report can use it as the denominator
             # instead of counting unscoreable decisions as passes.
             "has_reasoning":       bool((reasoning or "").strip()),
+            # Whether a BUY was legal this step, for the capacity hold rate.
+            "could_buy":           could_buy,
+            # Which of the agent's OWN exit rules were due BEFORE the trade. Stored
+            # because positions in this entry are logged after execution, so the
+            # exit-rule dimension of the persona score cannot be rebuilt offline
+            # without it (analyze_sweep.py --rescore reads it).
+            "exits_due":           sorted(exits_due),
             "stale_context":       stale_flag,
             "state_contradiction": grounding_flag,
             "persona_drift_score": drift_score,
@@ -1450,6 +1459,8 @@ class TradingReverie:
                 "stale_context_hits":    0,
                 "state_contradictions":  0,
                 "drift_scores":          [],  # persona_drift_score per step
+                "capacity_decisions":    0,   # decisions where a BUY was legal
+                "capacity_holds":        0,   # ...of which the agent held
                 "mc_nodes_in":           0,
                 "mc_nodes_out":          0,
                 "mc_dropped_duplicate":  0,
@@ -1482,6 +1493,9 @@ class TradingReverie:
 
             ag["total_decisions"] += 1
             ag["action_counts"][action] = ag["action_counts"].get(action, 0) + 1
+            if entry.get("could_buy"):
+                ag["capacity_decisions"] += 1
+                ag["capacity_holds"] += action == "hold"
 
             if action in ("buy", "sell"):
                 ag["active_decisions"] += 1
@@ -1603,6 +1617,11 @@ class TradingReverie:
             abstention_rate = round(ag["action_counts"].get("hold", 0)
                                     / total * 100, 1)
 
+            # HOLD rate over the decisions where a BUY was legal; None if never.
+            capacity_hold_pct = (
+                round(ag["capacity_holds"] / ag["capacity_decisions"] * 100, 1)
+                if ag["capacity_decisions"] else None)
+
             # drift_scores only ever collects non-None values, so this averages
             # over decisions that were actually scoreable.
             scores = ag["drift_scores"]
@@ -1639,8 +1658,10 @@ class TradingReverie:
                 "scored_decisions":             len(scores),
                 # Run-level: an aggressive agent holding most of the run. The
                 # per-decision score cannot see this; see hold_rate_drift().
+                "capacity_hold_rate_pct":       capacity_hold_pct,
                 "persona_hold_drift":           hold_rate_drift(
-                    abstention_rate / 100, self.personas[name]),
+                    None if capacity_hold_pct is None
+                    else capacity_hold_pct / 100, self.personas[name]),
                 "memory_compression": {
                     "nodes_in":          ag["mc_nodes_in"],
                     "nodes_out":         ag["mc_nodes_out"],
@@ -1872,8 +1893,11 @@ class TradingReverie:
             print(f"    Abstention     : {ag.get('abstention_rate_pct', 0)}% HOLD"
                   + ("" if ag.get("participated", True)
                      else "   <- NON-PARTICIPANT: requested no trades all run")
-                  + ("   <- PERSONA DRIFT: aggressive profile, held most of the run"
-                     if ag.get("persona_hold_drift") else ""))
+                  + ("   <- PERSONA DRIFT: aggressive profile, held most of the "
+                     "steps it could buy" if ag.get("persona_hold_drift") else ""))
+            if ag.get("capacity_hold_rate_pct") is not None:
+                print(f"    Hold when able : {ag['capacity_hold_rate_pct']}% "
+                      f"of decisions where a BUY was legal")
             print(f"    Portfolio PnL  : ${ag['pnl_usd']:+,.2f}  "
                   f"(${ag['start_portfolio_usd']:,.0f} -> ${ag['end_portfolio_usd']:,.0f})")
             print()

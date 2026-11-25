@@ -112,6 +112,8 @@
   "specialization": "technology equities",
   "risk_tolerance": "moderate",
   "risk_limit_per_trade": 0.03,
+  "stop_loss_pct": 0.08,
+  "take_profit_pct": 0.15,
   "watchlist": ["NVDA", "AAPL", "AMD", "GOOGL"],
   "pnl_today": 0.0,
   "pnl_total": 0.0

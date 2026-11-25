@@ -105,5 +105,7 @@
     "AAPL"
   ],
   "pnl_today": 0.0,
-  "pnl_total": 0.0
+  "pnl_total": 0.0,
+  "stop_loss_pct": 0.06,
+  "take_profit_pct": 0.1
 }

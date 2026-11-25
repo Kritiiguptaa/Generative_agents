@@ -17,7 +17,7 @@ import analyze_sweep as A
 
 def block(name, decisions=100, attempts=10, halluc=2, hold=90.0, persona="0.95",
           drift=3, scored=100, buy=10, contra=4, reasoned=100, pnl="+100.00",
-          start="100,000", end="100,100", flag=""):
+          start="100,000", end="100,100", flag="", able=None):
     hall = (f"{halluc}  ({100.0 * halluc / attempts:.1f}% of {attempts} attempts)"
             if attempts else "0  (N/A (no trades requested))")
     return f"""  {name}
@@ -31,7 +31,7 @@ def block(name, decisions=100, attempts=10, halluc=2, hold=90.0, persona="0.95",
     Persona consistency   : avg={persona}  drift events={drift}  (scored {scored})
     Actions        : buy={buy}  sell=0  hold={decisions - buy}  analyze=0
     Abstention     : {hold}% HOLD{flag}
-    Portfolio PnL  : ${pnl}  (${start} -> ${end})
+{('    Hold when able : ' + str(able) + '% of decisions where a BUY was legal' + chr(10)) if able is not None else ''}    Portfolio PnL  : ${pnl}  (${start} -> ${end})
 
 """
 
@@ -224,7 +224,9 @@ def paired_log(seed=42, advanced="middleware", mw_only=3, base_only=9,
             ("caught pre-execution", "5", "0"), ("EXECUTED malformed", "0", "12"),
             ("abstention %", "92.0", "92.0"), ("participating agents", "7", "7"),
             ("stale context hits", "1", "2"), ("state contradictions", "4", "3"),
-            ("avg context chars", "201.5", "960.2")]
+            ("avg context chars", "201.5", "960.2"),
+            ("persona consistency avg", "0.97", "0.95"), ("persona drift events", "2", "4"),
+            ("hold % when able to buy", "61.5", "70.3")]
     body = "\n".join(f"{a:<28}{b:>14}{c:>14}" for a, b, c in rows)
     head = f"\n{sep}\nPAIRED EVALUATION REPORT\n{sep}\n" if report else "\nstill running\n"
     return (head + f"Seed            : {seed}\nAdvanced with   : {advanced}\nMatched pairs   : 900\n"
@@ -234,6 +236,32 @@ def paired_log(seed=42, advanced="middleware", mw_only=3, base_only=9,
             f"  baseline infeasible, middleware fine : {base_only}\n"
             f"  both infeasible                      : 2\n"
             f"  neither                              : 886\n\nnote text\n")
+
+
+class MergedReportFields(unittest.TestCase):
+    """Lines added by the persona commit (d71ed70): hold when able, persona rows in the paired table."""
+
+    def test_the_per_agent_block_reads_hold_when_able(self):
+        r = A.parse_log(log(block("Ann Aggr", able=61.5)))["Ann Aggr"]
+        self.assertEqual(r["hold_able"], 61.5)
+        self.assertEqual(r["pnl"], 100.0)                       # the line after it still parses
+        self.assertNotIn("hold_able", A.parse_log(log(block("Ann Aggr")))["Ann Aggr"])
+
+    def test_the_paired_table_reads_the_persona_and_hold_when_able_rows(self):
+        r = A.parse_paired_log(paired_log())
+        self.assertEqual((r["mw"]["persona_avg"], r["base"]["persona_avg"]), (0.97, 0.95))
+        self.assertEqual((r["mw"]["persona_drift"], r["base"]["persona_drift"]), (2.0, 4.0))
+        self.assertEqual((r["mw"]["hold_able_pct"], r["base"]["hold_able_pct"]), (61.5, 70.3))
+        self.assertIn("61.5 / 70.3", A.paired_section([dict(r, arm="pmw", seed=42)]))
+
+    def test_hold_when_able_is_averaged_per_seed_and_bucket(self):
+        s = _Sweep()
+        self.addCleanup(s.close)
+        s.write("mw_s42.log", log(block("Ann Aggr", able=60.0), block("Cara Cons", able=90.0)))
+        rows, _ = s.load()
+        for r in rows:
+            r["bucket"] = "aggressive"
+        self.assertAlmostEqual(A.seed_bucket_metrics(rows)[("mw", "aggressive", 42)]["hold_able"], 75.0)
 
 
 class WilsonInterval(unittest.TestCase):
@@ -342,6 +370,27 @@ class Rescore(unittest.TestCase):
         self.assertEqual((r["persona"], r["drift"], r["scored"]), (0.75, 1, 2))
         self.assertEqual(changed, 1)
         self.assertEqual(notes, [])
+
+    def test_a_due_exit_that_was_held_through_is_drift_and_a_sale_is_compliance(self):
+        s = self.s
+        s.write("mw_s42.log", log(block("Cara Cons", persona="1.00", drift=0, scored=2)))
+        held = self._entry("Cara Cons", "hold", None, "waiting")
+        held["exits_due"] = ["AAPL"]                     # her own stop-loss was due and she held
+        sold = self._entry("Cara Cons", "sell", "AAPL", "cutting the loss")
+        sold["exits_due"] = ["AAPL"]                     # same exit due, and she sold it
+        s.write_sim("t1", "mw", 42, [held, sold])
+        rows, _ = s.load()
+        A.rescore_rows(rows, s.storage, "t1", A.load_personas(s.storage, "f"))
+        # held: exit check fails + language passes -> 0.5.  sold: exit check passes + language passes -> 1.0
+        self.assertEqual((rows[0]["persona"], rows[0]["drift"], rows[0]["scored"]), (0.75, 1, 2))
+
+    def test_a_log_entry_without_exits_due_is_scored_without_the_exit_check(self):
+        s = self.s
+        s.write("mw_s42.log", log(block("Cara Cons", persona="0.50", drift=1, scored=1)))
+        s.write_sim("t1", "mw", 42, [self._entry("Cara Cons", "hold", None, "waiting")])   # no exits_due key
+        rows, _ = s.load()
+        A.rescore_rows(rows, s.storage, "t1", A.load_personas(s.storage, "f"))
+        self.assertEqual((rows[0]["persona"], rows[0]["drift"]), (1.0, 0))
 
     def test_a_missing_sim_keeps_the_printed_numbers_and_says_so(self):
         s = self.s
