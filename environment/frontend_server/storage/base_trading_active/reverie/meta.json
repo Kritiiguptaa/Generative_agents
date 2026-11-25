@@ -1,0 +1,19 @@
+{
+  "fork_sim_code": "base_trading_active",
+  "start_date": "January 15, 2024",
+  "curr_time": "January 15, 2024, 09:30:00",
+  "sec_per_step": 60,
+  "maze_name": "trading_market",
+  "persona_names": [
+    "Alex Chen",
+    "Marcus Webb",
+    "Sara Kim",
+    "Margaret Okafor",
+    "Daniel Reyes",
+    "Priya Nair",
+    "Tomas Herrera",
+    "Jade Whitfield",
+    "Kofi Mensah"
+  ],
+  "step": 0
+}

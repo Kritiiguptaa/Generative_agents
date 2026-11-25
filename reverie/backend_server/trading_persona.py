@@ -56,6 +56,10 @@ class TradingPersona(Persona):
         s.specialization       = data.get("specialization", None)
         s.risk_tolerance       = data.get("risk_tolerance", "moderate")
         s.risk_limit_per_trade = float(data.get("risk_limit_per_trade", 0.05))
+        # Exit rules as fractions, None when the strategy states none. Scored by
+        # persona_anchoring.strategy_exits_due(); not shown to the model.
+        s.stop_loss_pct        = data.get("stop_loss_pct")
+        s.take_profit_pct      = data.get("take_profit_pct")
         s.watchlist            = data.get("watchlist", [])
         s.trading_strategy     = data.get("trading_strategy", None)
         s.pnl_today            = float(data.get("pnl_today", 0.0))
@@ -109,6 +113,8 @@ class TradingPersona(Persona):
         scratch_data["specialization"]       = s.specialization
         scratch_data["risk_tolerance"]       = s.risk_tolerance
         scratch_data["risk_limit_per_trade"] = s.risk_limit_per_trade
+        scratch_data["stop_loss_pct"]        = s.stop_loss_pct
+        scratch_data["take_profit_pct"]      = s.take_profit_pct
         scratch_data["watchlist"]            = s.watchlist
         scratch_data["trading_strategy"]     = s.trading_strategy
         scratch_data["pnl_today"]            = s.pnl_today

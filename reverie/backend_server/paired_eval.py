@@ -59,8 +59,26 @@ from trading_reverie import (
     check_state_grounding,
     _check_stale_reasoning,
     execute_trading_action,
+    # One definition of the order-rejection memory, shared with the runner.
+    # Two copies of it had already drifted apart; see the function's docstring.
+    build_order_feedback,
 )
-from middleware.action_filtering import run_action_filtering_step, is_trade_request
+# run_action_filtering_step is deliberately NOT imported: the decision step is
+# composed by MiddlewareWrapper.decide(), so this harness cannot assemble a
+# different pipeline from the runner's.
+from middleware.action_filtering import is_trade_request
+from middleware.persona_anchoring import (
+    score_persona_consistency,
+    strategy_exits_due,
+    can_buy,
+    hold_rate_drift,
+)
+from middleware.middleware_wrapper import MiddlewareWrapper
+from middleware.metrics_recorder import (
+    collect_run_metadata,
+    format_meta_lines,
+    recorder_from_pairs,
+)
 from persona.cognitive_modules.retrieve import new_retrieve
 from persona.prompt_template.gpt_structure import ollama_request
 from market_perceive import market_perceive, record_trade_fill, record_order_feedback
@@ -155,11 +173,20 @@ class PairedEvaluation(TradingReverie):
         base_snap = _snapshot(persona)
 
         # --- middleware arm -------------------------------------------------
+        # Composed by MiddlewareWrapper, exactly as the runner composes it. This
+        # block previously called build_memory_context and
+        # run_action_filtering_step itself, which is how it was able to run a
+        # DIFFERENT middleware from the runner in run 06 without anything
+        # failing: it had simply omitted the ID-RAG graph updates. There is now
+        # one composition point and nothing here to get out of step.
         refresh_currently(persona, market)
-        mw_context, mc_stats = build_memory_context(
-            retrieved, persona, market, use_middleware=True)
-        mw_decision, mw_stats = run_action_filtering_step(
-            persona, market, mw_context, _call_llm, self.action_filter_log_path)
+        wrapper = MiddlewareWrapper(
+            action_log_path=self.action_filter_log_path)
+        prepared = wrapper.prepare(persona, market, retrieved)
+        mw_outcome = wrapper.decide(prepared, _call_llm)
+        mw_context = prepared.memory_context
+        mc_stats = prepared.compression_stats
+        mw_decision, mw_stats = mw_outcome.decision, mw_outcome.stats
         mw_score = _classify(persona, market, mw_decision, mw_stats)
         _restore(persona, base_snap)
 
@@ -230,6 +257,12 @@ class PairedEvaluation(TradingReverie):
               f"x{bs_d.get('quantity')}"
               f"{'  INFEASIBLE' if both['baseline']['score']['infeasible'] else ''}")
 
+        # Persona state BEFORE the driving arm trades. Both arms are scored
+        # against it: taken afterwards, the arm that did not advance the world
+        # would be judged on the other arm's trade.
+        exits_due = strategy_exits_due(persona, self.market.current_prices)
+        could_buy = can_buy(persona, self.market)
+
         # Only the driving arm mutates the world.
         driver = both["middleware"] if self.advance_with == "middleware" else both["baseline"]
         decision = driver["decision"]
@@ -238,13 +271,26 @@ class PairedEvaluation(TradingReverie):
             record_trade_fill(persona, self.market, result["fill"])
 
         req = driver["stats"].get("requested") or {}
-        if driver["score"]["infeasible"]:
-            record_order_feedback(
-                persona, self.market,
-                f"{name}'s order to {req.get('action')} {req.get('quantity')} "
-                f"{req.get('symbol')} was REJECTED/ADJUSTED. "
-                f"Cash ${persona.scratch.cash_balance:,.0f}. "
-                f"Do not repeat this order unless the position or cash changes.")
+        # Shared with TradingReverie._step_agent rather than written out again.
+        # This block used to be a single branch emitting a generic
+        # "REJECTED/ADJUSTED", triggered on score["infeasible"], where the
+        # runner picked between three branches, named the validator's reason and
+        # distinguished a refused order from a resized one. Both harnesses
+        # therefore wrote DIFFERENT memories for the same rejection, and since
+        # that memory enters retrieval, their agents diverged from the first
+        # rejection onward while claiming to run identical configurations.
+        # Observed with seed 42: decision prompts were byte identical up to the
+        # first rejection and diverged immediately after it.
+        feedback = build_order_feedback(
+            name=name,
+            requested=req,
+            illegal_request=bool(driver["stats"].get("illegal_request")),
+            error_reason=driver["stats"].get("error_reason") or "",
+            result=result,
+            cash=persona.scratch.cash_balance,
+        )
+        if feedback:
+            record_order_feedback(persona, self.market, feedback)
 
         pair = {
             "step": step,
@@ -253,6 +299,7 @@ class PairedEvaluation(TradingReverie):
             "portfolio_value_before": pv_before,
             "cash": round(persona.scratch.cash_balance, 2),
             "market_prices": dict(self.market.current_prices),
+            "could_buy": could_buy,
         }
         for arm in ("middleware", "baseline"):
             side = both[arm]
@@ -273,6 +320,9 @@ class PairedEvaluation(TradingReverie):
                     reasoning, step, self.market.SCRIPTED_NEWS),
                 "state_contradiction": check_state_grounding(
                     reasoning, persona, self.market),
+                "persona_score": score_persona_consistency(
+                    reasoning, persona, side["stats"].get("requested") or {},
+                    exits_due),
             }
         self.pairs.append(pair)
         log.append(pair)
@@ -285,26 +335,54 @@ class PairedEvaluation(TradingReverie):
             "seed": self.seed,
             "simulation_steps": n_steps,
             "total_pairs": len(self.pairs),
+            # Same metadata block the independent report carries, from the same
+            # function. This report previously recorded only the seed, so it
+            # could not say which model or temperature produced it.
+            "run_metadata": collect_run_metadata(
+                temperature=self.temperature,
+                seed=self.seed,
+                steps=n_steps,
+                config_name=self.sim_code,
+            ),
             "per_agent": {},
         }
         for arm in ("middleware", "baseline"):
-            # Same denominator definition the independent report uses -- see
-            # is_trade_request(). An invalid verb is a trade request; a null
-            # action (unparseable) is not.
-            attempts = sum(
-                1 for p in self.pairs
-                if is_trade_request(
-                    p[arm]["requested"]
-                    if p[arm]["requested"].get("action")
-                    else {"action": p[arm]["action"]}))
-            infeasible = sum(1 for p in self.pairs if p[arm]["infeasible"])
-            caught = sum(1 for p in self.pairs
-                         if p[arm]["disposition"] == "caught_pre_execution")
-            executed = sum(1 for p in self.pairs
-                           if p[arm]["disposition"] == "executed_malformed")
-            reasoned = sum(1 for p in self.pairs if p[arm]["has_reasoning"])
-            stale = sum(1 for p in self.pairs if p[arm]["stale_context"])
-            contra = sum(1 for p in self.pairs if p[arm]["state_contradiction"])
+            # Every figure below comes from MetricsRecorder, which holds one
+            # definition of each metric. These were previously inline sums here
+            # AND in trading_reverie's report, and the two copies drifted: that
+            # report gained abstention and a non-participant warning while this
+            # one never did, so two reports of the same run could not be
+            # compared on the measure that decides whether a clean rate was
+            # earned or merely abstained into.
+            metrics = recorder_from_pairs(self.pairs, arm,
+                                          config_name=self.sim_code)
+            arm_summary = metrics.summary()
+
+            attempts = arm_summary["trade_attempts"]["count"]
+            infeasible = arm_summary["infeasible_requests"]["count"]
+            caught = arm_summary["caught_pre_execution"]["count"]
+            executed = arm_summary["executed_malformed"]["count"]
+            reasoned = arm_summary["stale_context_hits"]["denominator"]
+            stale = arm_summary["stale_context_hits"]["count"]
+            contra = arm_summary["state_contradictions"]["count"]
+            holds = arm_summary["abstention"]["count"]
+            persona_m = arm_summary["persona_consistency"]
+            # HOLD rate over the steps where a BUY was legal, per agent. Both
+            # arms see the same states, so this is the like-for-like test of
+            # whether one arm makes an agent hold where it could have traded.
+            hold_drift_agents = []
+            able, able_holds = 0, 0
+            for a in agents:
+                rows = [p for p in self.pairs
+                        if p["agent"] == a and p.get("could_buy")]
+                n_hold = sum(1 for p in rows if p[arm]["action"] == "hold")
+                able += len(rows)
+                able_holds += n_hold
+                if hold_rate_drift(n_hold / len(rows) if rows else None,
+                                   self.personas[a]):
+                    hold_drift_agents.append(a)
+            traders = set(agents) - set(
+                arm_summary["participation"]["non_participants"])
             per_agent_eps = 0
             for a in agents:
                 reqs = [(p["step"], (p[arm]["requested"].get("action"),
@@ -323,6 +401,14 @@ class PairedEvaluation(TradingReverie):
                                      if attempts else None),
                 "caught_pre_execution": caught,
                 "executed_malformed": executed,
+                # Reported beside every rate, never on its own: a 0% rate from
+                # an arm that mostly held is not the same result as a 0% rate
+                # from an arm that traded.
+                "abstention_rate_pct": (round(holds / len(self.pairs) * 100, 1)
+                                        if self.pairs else None),
+                "participating_agents": len(traders),
+                "total_agents": len(agents),
+                "non_participants": sorted(set(agents) - traders),
                 "reasoned_decisions": reasoned,
                 "stale_context_hits": stale,
                 "stale_rate_pct": (round(stale / reasoned * 100, 1)
@@ -332,6 +418,12 @@ class PairedEvaluation(TradingReverie):
                                                  if reasoned else None),
                 "kinds": dict(Counter(p[arm]["kind"] for p in self.pairs
                                       if p[arm]["kind"])),
+                "avg_persona_consistency": persona_m["average"],
+                "persona_drift_events": persona_m["drift_events"],
+                "persona_scored": persona_m["denominator"],
+                "hold_when_able_pct": (round(able_holds / able * 100, 1)
+                                       if able else None),
+                "persona_hold_drift_agents": hold_drift_agents,
                 "avg_context_chars": (round(sum(p[arm]["context_chars"]
                                                 for p in self.pairs) / len(self.pairs))
                                       if self.pairs else 0),
@@ -365,6 +457,15 @@ class PairedEvaluation(TradingReverie):
         print(f"Seed            : {report['seed']}")
         print(f"Advanced with   : {report['advanced_with']}")
         print(f"Matched pairs   : {report['total_pairs']}")
+        # Appended beneath the existing labels, from the same formatter the
+        # independent report uses, so the two cannot describe a run
+        # differently.
+        # "seed" is skipped: this report prints its own Seed line three lines
+        # up, and two lines with the same label would give a line-oriented
+        # parser two candidates for one field.
+        for line in format_meta_lines(report.get("run_metadata") or {},
+                                      skip=frozenset({"seed"})):
+            print(line)
         print()
         hdr = f"{'':<28}{'middleware':>14}{'baseline':>14}"
         print(hdr)
@@ -376,14 +477,27 @@ class PairedEvaluation(TradingReverie):
             ("distinct episodes", "episodes"),
             ("caught pre-execution", "caught_pre_execution"),
             ("EXECUTED malformed", "executed_malformed"),
+            # Appended after the existing rows, so a parser matching the old
+            # ones is unaffected. Printed next to the rates because a clean
+            # rate from an abstaining arm is not a clean result.
+            ("abstention %", "abstention_rate_pct"),
+            ("participating agents", "participating_agents"),
             ("stale context hits", "stale_context_hits"),
             ("state contradictions", "state_contradictions"),
             ("avg context chars", "avg_context_chars"),
+            ("persona consistency avg", "avg_persona_consistency"),
+            ("persona drift events", "persona_drift_events"),
+            ("hold % when able to buy", "hold_when_able_pct"),
         ]
         for label, key in rows:
             mw = report["middleware"][key]
             bs = report["baseline"][key]
             print(f"{label:<28}{str(mw):>14}{str(bs):>14}")
+        for arm in ("middleware", "baseline"):
+            flagged = report[arm]["persona_hold_drift_agents"]
+            if flagged:
+                print(f"PERSONA DRIFT ({arm}): {', '.join(flagged)} -- aggressive "
+                      f"profile, held most of the steps it could buy")
         c = report["paired_contingency"]
         print(f"\nDiscordant pairs (the informative ones):")
         print(f"  middleware infeasible, baseline fine : {c['middleware_only']}")

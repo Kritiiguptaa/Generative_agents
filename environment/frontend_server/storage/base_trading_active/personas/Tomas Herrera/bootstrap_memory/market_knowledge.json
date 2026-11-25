@@ -1,0 +1,27 @@
+{
+  "known_stocks": {
+    "AMD": {
+      "sector": "semiconductors",
+      "last_known_price": 512.63,
+      "notes": [
+        "Semiconductor swing candidate; volatile but liquid"
+      ]
+    },
+    "TSLA": {
+      "sector": "electric vehicles",
+      "last_known_price": 371.18,
+      "notes": [
+        "High beta; use smaller scale-in sizes"
+      ]
+    },
+    "AAPL": {
+      "sector": "consumer technology",
+      "last_known_price": 275.21,
+      "notes": [
+        "Stable anchor for the swing book"
+      ]
+    }
+  },
+  "known_agents": [],
+  "market_context": "Swing mindset. Scale in, take partials, keep weights balanced."
+}

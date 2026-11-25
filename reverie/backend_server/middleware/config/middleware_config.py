@@ -14,10 +14,17 @@ class MiddlewareConfig:
     # chaos_step_interval: int = 10
     # random_seed: int = 42
 
-    # # ============ STABILIZER SETTINGS ============
-    enable_stabilizer: bool = True
-    entropy_discard_patterns: Optional[List[str]] = None
-    persona_anchor_template: str = (...)
+    # ============ REMOVED: STABILIZER SETTINGS ============
+    # enable_stabilizer, entropy_discard_patterns and persona_anchor_template
+    # are gone along with input_stabilizer.py. Nothing ever read any of them:
+    # the stabilizer was the original four-layer orchestrator, it imported four
+    # classes that do not exist (SemanticDensityGating, MemoryCompression,
+    # PersonaAnchoring, ActionFiltering) so it could not even be imported, and
+    # the live pipeline is composed by MiddlewareWrapper instead.
+    #
+    # A config field that nothing reads is worse than an absent one: it reads
+    # as a supported switch, so a future reader may set enable_stabilizer=False
+    # and believe a stage was disabled.
 
     # ============ MEMORY COMPRESSION SETTINGS ============
     # Set memory_compression_enabled=False for the ablation baseline arm.

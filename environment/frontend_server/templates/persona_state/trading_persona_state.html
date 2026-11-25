@@ -1,121 +1,245 @@
-{% extends "base.html" %}
-{% load staticfiles %}
+{% load staticfiles %}<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>{{ persona_name }} — {{ sim_code }}</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+	<!-- ?v= is a cache buster. The sheets are served by runserver with no
+	     fingerprint, and a browser holding the pre-redesign trading_ui.css --
+	     which declared its own dark :root -- renders this page half dark.
+	     Bump the token whenever a sheet changes. -->
+	<link rel="stylesheet" href="{% static 'css/anchor.css' %}?v=20260821b">
+	<link rel="stylesheet" href="{% static 'css/trading_ui.css' %}?v=20260821b">
+</head>
+<body>
 
-{% block content %}
+<!--
+	Agent dossier.
 
-<style>
-	.scratch_table {
-		font-size: 1.3em;
-	}
-</style>
+	This page used to be the stock Bootstrap scratch dump: one grey box, one
+	two-column table, every field weighted the same. It is the page a panel
+	lands on when they click an agent, so it now reads as a personnel file and
+	answers, in order:
 
-<h3 style="width:80%; margin:0 auto; margin-top:5em; padding:1em; padding-left:3.5em; padding-right:2em; border-radius:10px; padding-top:3em"><a href="/map/{{sim_code}}/{{step}}/">&lt; Return to trading floor</a></h3>
+	  1. who is this agent           -> the nameplate
+	  2. what were they built to be  -> the persona card
+	  3. what did they do here       -> the decision card, stamped
+	  4. what did the filter do      -> requested vs permitted, side by side
+	  5. what is their book worth    -> the ledger
 
-<div class="media" style="width:80%; margin:0 auto; margin-top:2em; background-color:#EEEEEE; padding:1em; padding-left:3.5em; padding-right:2em; border-radius:10px; padding-top:3em">
-  <div class="media-left media">
-    <a href="#">
-    	{% with 'assets/characters/profile/'|add:persona_name_underscore|add:'.png' as image_static %}
-      <img class="media-object" src="{% static image_static %}" style="width:5em">
-      {% endwith %}
-    </a>
-  </div>
-  <div class="media-body" style='padding-left:3em; padding-top:0.5em; padding-bottom:1em'>
-  	<div class="row">
-    	<h1 class="col-md-8" style="margin-bottom:0.8em; font-size:2em; ">
-    		{{persona_name}}
-    	</h1>
-    	<div class="col-md-4" style="text-align:right; padding-top:0.8em;">
-    		<span style="background:#d9edf7; color:#31708f; padding:0.4em 0.7em; border-radius:8px; font-weight:700;">Step {{step}}</span>
-    	</div>
-    </div>
+	The static persona (scratch.json) and the per-step decision (trading_log)
+	are two different kinds of fact, so they are two different cards. Flattening
+	them into one undifferentiated table was the old page's real problem.
+-->
 
-    <h3 style="font-size:1.65em"><strong>Persona</strong></h3>
-    <table class="scratch_table" style="width:100%">
-      <tr>
-        <td style="width:22%; font-weight:800">Trader type</td>
-        <td>{{snippet.trader_type}} &nbsp;<span style="color:#777">(risk tolerance: {{snippet.risk_tolerance}})</span></td>
-      </tr>
-      <tr>
-        <td style="font-weight:800">Traits</td>
-        <td>{{snippet.innate}}</td>
-      </tr>
-      <tr>
-        <td style="font-weight:800">Background</td>
-        <td>{{snippet.learned}}</td>
-      </tr>
-      <tr>
-        <td style="font-weight:800">Currently</td>
-        <td>{{snippet.currently}}</td>
-      </tr>
-      <tr>
-        <td style="font-weight:800">Trading strategy</td>
-        <td>{{snippet.trading_strategy}}</td>
-      </tr>
-      <tr>
-        <td style="font-weight:800">Watchlist</td>
-        <td>{{snippet.watchlist|join:", "}}</td>
-      </tr>
-    </table>
-
-    <br>
-
-    <h3 style="font-size:1.65em"><strong>Decision at step {{step}}</strong></h3>
-    {% if has_record %}
-    <table class="scratch_table" style="width:100%">
-      <tr>
-        <td style="width:22%; font-weight:800">Status</td>
-        <td>
-          {% if record.status == "success" %}
-            <span style="background:#dff0d8; color:#3c763d; padding:0.2em 0.6em; border-radius:6px;">SUCCESS</span>
-          {% elif record.status == "retry" %}
-            <span style="background:#fcf8e3; color:#8a6d3b; padding:0.2em 0.6em; border-radius:6px;">RETRY</span>
-          {% elif record.status == "fallback" %}
-            <span style="background:#f2dede; color:#a94442; padding:0.2em 0.6em; border-radius:6px;">FALLBACK</span>
-          {% else %}
-            <span style="background:#eeeeee; color:#777777; padding:0.2em 0.6em; border-radius:6px;">{{record.status|upper}}</span>
-          {% endif %}
-          {% if record.error_reason %} &nbsp;<span style="color:#a94442">{{record.error_reason}}</span>{% endif %}
-          {% if record.hallucination %} &nbsp;<span style="color:#a94442">(filtered by action_filtering)</span>{% endif %}
-        </td>
-      </tr>
-      <tr>
-        <td style="font-weight:800">Action</td>
-        <td>{{record.description}}{% if record.outcome %} — {{record.outcome}}{% endif %}</td>
-      </tr>
-      <tr>
-        <td style="font-weight:800">Reasoning</td>
-        <td>{{record.reasoning|default:"<em>none given</em>"}}</td>
-      </tr>
-      {% if record.stale_context %}
-      <tr>
-        <td style="font-weight:800">Stale context flag</td>
-        <td style="color:#a94442">{{record.stale_context}}</td>
-      </tr>
-      {% endif %}
-      {% if record.persona_drift_score != None %}
-      <tr>
-        <td style="font-weight:800">Persona consistency score</td>
-        <td>{{record.persona_drift_score|floatformat:2}}</td>
-      </tr>
-      {% endif %}
-      <tr>
-        <td style="font-weight:800">Portfolio value</td>
-        <td>${{record.portfolio_value|floatformat:0}} &nbsp;(cash ${{record.cash|floatformat:0}})</td>
-      </tr>
-      <tr>
-        <td style="font-weight:800">Positions</td>
-        <td>
-          {% for sym, pos in record.positions.items %}{{sym}} x{{pos.qty}}{% if not forloop.last %}, {% endif %}{% empty %}none{% endfor %}
-        </td>
-      </tr>
-    </table>
-    {% else %}
-    <p><em>No decision record yet for this step (the run may not have reached it, or hasn't started).</em></p>
-    {% endif %}
-
-  </div>
+<div class="topbar">
+	<a class="brand" href="/"><span class="mark">A</span>AGENT&nbsp;<span>ANCHOR</span></a>
+	<span class="chip">{{ sim_code }}</span>
+	<div class="spacer"></div>
+	{% if is_running %}<span class="live-dot"></span><span class="chip">LIVE</span>{% endif %}
+	<a class="btn primary" href="/map/{{ sim_code }}/{{ step }}/">&#9664; Trading floor</a>
+	<a class="btn" href="/run/{{ sim_code }}/">Run report</a>
 </div>
 
-<div style="margin-top:6em"></div>
+<div class="ps-wrap">
 
-{% endblock content %}
+	<!-- ==================================================== 1. THE NAMEPLATE -->
+	<section class="ps-plate">
+		{% with 'assets/characters/profile/'|add:persona_name_underscore|add:'.png' as image_static %}
+		<img class="ps-portrait" src="{% static image_static %}" alt="{{ persona_name }}">
+		{% endwith %}
+
+		<div class="ps-plate-id">
+			<span class="ps-doc">Agent dossier</span>
+			<h1>{{ persona_name }}</h1>
+			<div class="ps-plate-tags">
+				{% if snippet.trader_type %}<span class="ps-tag accent">{{ snippet.trader_type }}</span>{% endif %}
+				{% if snippet.risk_tolerance %}<span class="ps-tag">{{ snippet.risk_tolerance }} risk</span>{% endif %}
+				<span class="ps-tag">step {{ step }}</span>
+			</div>
+		</div>
+
+		<dl class="ps-form">
+			<div><dt>Decisions</dt><dd>{{ decision_count }}</dd></div>
+			<div><dt>Trades</dt><dd>{{ trades }}</dd></div>
+			<div><dt>Flagged</dt><dd class="{% if hallucinations %}v-bad{% endif %}">{{ hallucinations }}</dd></div>
+		</dl>
+	</section>
+
+	<!-- Peer switcher. The first question anyone asks on this page is "and the
+	     others?", and going back to the floor to click a card is a
+	     needless round trip. -->
+	{% if peers|length > 1 %}
+	<nav class="ps-peers">
+		<span>Others on the floor</span>
+		{% for p in peers %}
+			{% if p.is_current %}
+				<span class="ps-peer current">{{ p.original }}</span>
+			{% else %}
+				<a class="ps-peer" href="/trading_persona_state/{{ sim_code }}/{{ step }}/{{ p.underscore }}/">{{ p.original }}</a>
+			{% endif %}
+		{% endfor %}
+	</nav>
+	{% endif %}
+
+	<div class="ps-cols">
+
+		<!-- =================================================== 2. THE PERSONA -->
+		<section class="panel">
+			<div class="panel-head">
+				<span>Persona</span>
+				<div class="spacer"></div>
+				<span class="chip mono">scratch.json</span>
+			</div>
+			<div class="panel-body">
+				<p class="ps-note">Written before the run and never rewritten by it. Everything
+					below is an <i>input</i> to the model, not an observation of it.</p>
+
+				<div class="ps-field">
+					<div class="ps-field-k">Traits</div>
+					<div class="ps-field-v">{{ snippet.innate|default:"&mdash;" }}</div>
+				</div>
+				<div class="ps-field">
+					<div class="ps-field-k">Background</div>
+					<div class="ps-field-v">{{ snippet.learned|default:"&mdash;" }}</div>
+				</div>
+				<div class="ps-field">
+					<div class="ps-field-k">Currently</div>
+					<div class="ps-field-v">{{ snippet.currently|default:"&mdash;" }}</div>
+				</div>
+				<div class="ps-field">
+					<div class="ps-field-k">Strategy</div>
+					<div class="ps-field-v">{{ snippet.trading_strategy|default:"&mdash;" }}</div>
+				</div>
+				<div class="ps-field">
+					<div class="ps-field-k">Watchlist</div>
+					<div class="ps-field-v">
+						{% for s in snippet.watchlist %}<span class="ps-sym">{{ s }}</span>{% empty %}&mdash;{% endfor %}
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<!-- ================================================== 3. THE DECISION -->
+		<section class="panel">
+			<div class="panel-head">
+				<span>Decision</span>
+				<div class="spacer"></div>
+				{% if record_step is not None %}<span class="chip mono">step {{ record_step }}</span>{% endif %}
+			</div>
+			<div class="panel-body">
+
+				{% if not has_record %}
+					<div class="detail-empty">No decision logged for this agent at or before
+						step {{ step }} &mdash; the run may not have reached it, or hasn't started.</div>
+				{% else %}
+
+					{% if is_stale_frame %}
+					<div class="ps-carry">
+						Nothing was logged for this agent at step {{ step }}. This is their last
+						decision before it, from step {{ record_step }}.
+					</div>
+					{% endif %}
+
+					<!-- The stamp. Same rubber-stamp vocabulary the console prints on a
+					     blocked ticket and the run report stamps on its verdict. -->
+					<div class="ps-stamp {% if record.hallucination %}blocked{% elif record.status == "success" %}clean{% elif record.status == "retry" %}retry{% elif record.status == "fallback" %}fallback{% else %}unknown{% endif %}">
+						<b>{% if record.hallucination %}BLOCKED{% else %}{{ record.status|upper }}{% endif %}</b>
+						<i>{% if record.hallucination %}action_filtering.py refused it{% elif record.status == "success" %}passed the filter{% elif record.status == "retry" %}reprompted, then passed{% elif record.status == "fallback" %}unparseable &mdash; forced to hold{% else %}status not recorded{% endif %}</i>
+					</div>
+
+					<div class="ps-action">
+						<span class="ps-emoji">{{ record.pronunciatio }}</span>
+						<div>
+							<b>{{ record.description }}</b>
+							{% if outcome %}<span>{{ outcome }}</span>{% endif %}
+						</div>
+					</div>
+
+					{% if record.error_reason %}
+					<div class="ps-why">{{ record.error_reason }}</div>
+					{% endif %}
+
+					<!-- ================================ 4. REQUESTED vs PERMITTED -->
+					{% if decision.requested %}
+					<div class="ps-split">
+						<div class="ps-split-half req">
+							<span>Model requested</span>
+							<b>{{ decision.requested.action|default:"?" }}
+							   {{ decision.requested.symbol|default:"-" }}
+							   {% if decision.requested.quantity %}&times;{{ decision.requested.quantity }}{% endif %}</b>
+						</div>
+						<div class="ps-split-arrow">&rarr;</div>
+						<div class="ps-split-half {% if record.hallucination %}denied{% else %}ok{% endif %}">
+							<span>Permitted</span>
+							<b>{{ record.description }}</b>
+						</div>
+					</div>
+					{% if decision.halluc_kind %}
+					<div class="ps-kind">Flagged as <code>{{ decision.halluc_kind }}</code>{% if decision.disposition %}, disposition <code>{{ decision.disposition }}</code>{% else %} &mdash; disposition not recorded in this log{% endif %}</div>
+					{% endif %}
+					{% else %}
+					<p class="ps-note">This log predates the <code>requested</code> field, so the
+						raw model output cannot be shown beside what was permitted.</p>
+					{% endif %}
+
+					{% if record.reasoning %}
+					<div class="ps-field">
+						<div class="ps-field-k">Reasoning</div>
+						<div class="ps-field-v ps-quote">{{ record.reasoning }}</div>
+					</div>
+					{% endif %}
+
+					{% if record.stale_context %}
+					<div class="ps-field">
+						<div class="ps-field-k">Stale context</div>
+						<div class="ps-field-v v-bad">{{ record.stale_context }}</div>
+					</div>
+					{% endif %}
+					{% if record.persona_drift_score is not None %}
+					<div class="ps-field">
+						<div class="ps-field-k">Persona consistency</div>
+						<div class="ps-field-v">{{ record.persona_drift_score|floatformat:2 }}
+							<span class="ps-hint">near-constant across every run &mdash; not discriminative</span></div>
+					</div>
+					{% endif %}
+
+				{% endif %}
+			</div>
+		</section>
+	</div>
+
+	<!-- ====================================================== 5. THE LEDGER -->
+	{% if has_record %}
+	<section class="panel">
+		<div class="panel-head">
+			<span>Book</span>
+			<div class="spacer"></div>
+			{% if record_step is not None %}<span class="chip mono">as of step {{ record_step }}</span>{% endif %}
+		</div>
+		<div class="panel-body ps-book">
+			<div class="ps-book-figs">
+				<div><span>portfolio value</span><b>{% if portfolio_value_fmt %}${{ portfolio_value_fmt }}{% else %}<span class="v-missing">not recorded</span>{% endif %}</b></div>
+				<div><span>cash</span><b>{% if cash_fmt %}${{ cash_fmt }}{% else %}<span class="v-missing">not recorded</span>{% endif %}</b></div>
+			</div>
+			<div class="ps-positions">
+				<span class="ps-field-k">Positions</span>
+				<div class="ps-pos-row">
+					{% for sym, pos in record.positions.items %}
+						<span class="ps-pos"><b>{{ sym }}</b> &times;{{ pos.qty }}</span>
+					{% empty %}
+						<span class="ps-hint">flat &mdash; no open positions</span>
+					{% endfor %}
+				</div>
+			</div>
+		</div>
+	</section>
+	{% endif %}
+
+</div>
+
+</body>
+</html>

@@ -25,7 +25,8 @@ from trading_reverie import (refresh_currently, check_state_grounding,
                              _count_episodes, execute_trading_action)
 from middleware.action_filtering import (get_legal_actions, build_prompt,
                                          _get_spendable_budget)
-from middleware.persona_anchoring import (score_persona_consistency,
+from middleware.persona_anchoring import (score_persona_consistency, hold_rate_drift,
+                                          strategy_exits_due,
                                           PERSONA_DRIFT_THRESHOLD)
 
 
@@ -211,6 +212,215 @@ class PersonaWatchlistCheck(unittest.TestCase):
 
     def test_empty_reasoning_is_unscoreable_not_perfect(self):
         self.assertIsNone(score_persona_consistency("   ", self.agent))
+
+    def test_buying_off_watchlist_is_drift_even_without_reasoning(self):
+        score = score_persona_consistency(
+            "", self.agent, {"action": "buy", "symbol": "GOOGL", "quantity": 5})
+        self.assertLessEqual(score, PERSONA_DRIFT_THRESHOLD)
+
+    def test_buying_on_watchlist_is_scored_in_character(self):
+        self.assertEqual(1.0, score_persona_consistency(
+            "", self.agent, {"action": "buy", "symbol": "TSLA", "quantity": 5}))
+
+    def test_selling_off_watchlist_holding_is_not_drift(self):
+        # Exiting a position is in character; only the reasoning is scored.
+        self.assertIsNone(score_persona_consistency(
+            "", self.agent, {"action": "sell", "symbol": "GOOGL", "quantity": 5}))
+
+    def test_bought_symbol_is_not_scored_twice_via_reasoning(self):
+        # One off-watchlist buy is one violation, not two: the language check
+        # also runs for an aggressive agent and passes, so 1 of 2 -> 0.5.
+        score = score_persona_consistency(
+            "Buying GOOGL.", self.agent, {"action": "buy", "symbol": "GOOGL"})
+        self.assertEqual(0.5, score)
+
+    def test_aggressive_agent_holding_most_of_run_is_drift(self):
+        self.assertTrue(hold_rate_drift(0.7, self.agent))
+        self.assertFalse(hold_rate_drift(0.4, self.agent))
+
+    def test_moderate_agent_holding_all_run_is_not_drift(self):
+        self.assertFalse(hold_rate_drift(1.0, _Agent(tol="moderate", watchlist=("NVDA",))))
+
+    def test_never_able_to_buy_is_not_drift(self):
+        # Fully invested all run: holding is the only option, not a choice.
+        self.assertFalse(hold_rate_drift(None, self.agent))
+
+
+class StrategyExitRules(unittest.TestCase):
+    """
+    The agent's own stop-loss / take-profit, scored against what it did.
+
+    Alex Chen's strategy says "cut losers at 8% loss without exception" and
+    "trim winners at 15% gain"; nothing scored either before.
+    """
+
+    def setUp(self):
+        self.agent = _Agent(tol="moderate", watchlist=("NVDA", "AAPL"),
+                            positions={"NVDA": {"qty": 10, "avg_price": 100.0},
+                                       "AAPL": {"qty": 5, "avg_price": 100.0}})
+        self.agent.scratch.stop_loss_pct = 0.08
+        self.agent.scratch.take_profit_pct = 0.15
+
+    def test_breached_stop_and_target_are_due(self):
+        due = strategy_exits_due(self.agent, {"NVDA": 91.0, "AAPL": 116.0})
+        self.assertEqual({"NVDA", "AAPL"}, due)
+
+    def test_inside_the_band_nothing_is_due(self):
+        self.assertEqual(set(), strategy_exits_due(
+            self.agent, {"NVDA": 93.0, "AAPL": 114.0}))
+
+    def test_persona_without_rules_has_nothing_due(self):
+        agent = _Agent(positions={"NVDA": {"qty": 10, "avg_price": 100.0}})
+        self.assertEqual(set(), strategy_exits_due(agent, {"NVDA": 50.0}))
+
+    def test_holding_through_a_due_stop_is_drift(self):
+        score = score_persona_consistency(
+            "Waiting for a rebound.", self.agent, {"action": "hold"}, {"NVDA"})
+        self.assertLessEqual(score, PERSONA_DRIFT_THRESHOLD)
+
+    def test_selling_the_due_symbol_is_in_character(self):
+        self.assertEqual(1.0, score_persona_consistency(
+            "", self.agent, {"action": "sell", "symbol": "NVDA"}, {"NVDA"}))
+
+    def test_selling_a_different_symbol_does_not_satisfy_the_rule(self):
+        score = score_persona_consistency(
+            "", self.agent, {"action": "sell", "symbol": "AAPL"}, {"NVDA"})
+        self.assertEqual(0.0, score)
+
+
+class ConservativeLimitLanguage(unittest.TestCase):
+    """
+    Regression: "maximum position" is on the aggressive-word list, so a
+    conservative agent citing its own limit ("within the maximum position
+    limit") was scored as drifting. The first nine-agent smoke run (smoke9_mw) scored
+    Daniel Reyes 0.50 on exactly that sentence.
+    """
+
+    def setUp(self):
+        self.agent = _Agent(name="Daniel Reyes", tol="conservative",
+                            watchlist=("AAPL", "GOOGL", "NVDA"))
+
+    def test_citing_the_position_limit_is_not_drift(self):
+        for text in (
+            "AAPL and GOOGL are already within the maximum position limit.",
+            "I am at the maximum position limit for GOOGL, so I hold.",
+            "NVDA is under the maximum position allowed by my policy.",
+            "That would exceed the maximum leverage cap, so I will wait.",
+        ):
+            self.assertEqual(1.0, score_persona_consistency(text, self.agent), text)
+
+    def test_the_smoke9_sentence_scores_in_character(self):
+        text = ("Maintain current positions as per the strategy. NVDA's recent "
+                "fall requires volume confirmation before considering a purchase. "
+                "AAPL and GOOGL are already within the maximum position limit, "
+                "and the current portfolio value is already close to the maximum "
+                "value for a single trade.")
+        self.assertEqual(1.0, score_persona_consistency(text, self.agent))
+
+    def test_real_aggressive_intent_still_flags(self):
+        for text in (
+            "Time to go to maximum position in NVDA.",
+            "Going all-in on GOOGL.",
+            "This is a massive opportunity, go big on AAPL.",
+            "I will take maximum leverage here.",
+        ):
+            self.assertLessEqual(score_persona_consistency(text, self.agent),
+                                 PERSONA_DRIFT_THRESHOLD, text)
+
+
+class HoldCommentaryIsNotDrift(unittest.TestCase):
+    """
+    Regression: the reasoning-symbol check scored a HOLD 0.50 when every stock
+    it named was off the watchlist. In the first 100-step nine-agent run, a
+    conservative agent that never traded (watchlist AAPL, GOOGL) hit this five
+    times for sentences like "Elon Musk selling a significant amount of Tesla
+    shares might indicate some market volatility". Naming a stock while holding
+    is commentary; only acting on it can contradict a watchlist.
+    """
+
+    HOLD = {"action": "hold", "symbol": None, "quantity": 0}
+
+    def setUp(self):
+        self.agent = _Agent(name="Margaret Okafor", tol="conservative",
+                            watchlist=("AAPL", "GOOGL"))
+
+    def test_the_run_sentences_score_in_character_on_a_hold(self):
+        for text in (
+            "I am cautious. The recent news about Tesla recalls and NHTSA "
+            "autopilot safety probe increases my concern.",
+            "Given the recent gains in NVDA and the potential supply "
+            "bottleneck, it would be prudent to wait for a mo",
+            "The CPI print raising fears of resumed hikes and Elon Musk selling "
+            "a significant amount of Tesla shares might indicate volatility.",
+        ):
+            self.assertEqual(1.0, score_persona_consistency(text, self.agent, self.HOLD), text)
+
+    def test_a_sell_that_mentions_an_off_watchlist_stock_is_not_drift(self):
+        sell = {"action": "sell", "symbol": "TSLA", "quantity": 2}
+        self.assertEqual(1.0, score_persona_consistency(
+            "Trimming TSLA because of the recall news.", self.agent, sell))
+
+    def test_buying_an_off_watchlist_stock_still_flags(self):
+        buy = {"action": "buy", "symbol": "TSLA", "quantity": 2}
+        self.assertLessEqual(score_persona_consistency(
+            "Buying TSLA on the dip.", self.agent, buy), PERSONA_DRIFT_THRESHOLD)
+
+    def test_without_an_order_the_reasoning_check_still_runs(self):
+        # Callers that cannot say what the agent did keep the old behaviour.
+        self.assertLessEqual(score_persona_consistency(
+            "Tesla recalls worry me.", self.agent), PERSONA_DRIFT_THRESHOLD)
+        self.assertLessEqual(score_persona_consistency(
+            "Tesla recalls worry me.", self.agent, {}), PERSONA_DRIFT_THRESHOLD)
+
+    def test_aggressive_wording_on_a_hold_still_flags(self):
+        self.assertLessEqual(score_persona_consistency(
+            "Not buying today, but I am going all-in tomorrow.", self.agent, self.HOLD),
+            PERSONA_DRIFT_THRESHOLD)
+
+
+class WholeWordLanguageMatch(unittest.TestCase):
+    """
+    Regression: the language lists were matched as substrings, so "all in"
+    matched inside "fall in" and "fall indicates", and "panic" matched a
+    description of the market. Three false drift events in the second 100-step
+    nine-agent run, all on HOLDs: Daniel and Priya (conservative) for the word
+    "fall", Kofi (aggressive) for "short-term panic".
+    """
+
+    HOLD = {"action": "hold", "symbol": None, "quantity": 0}
+
+    def test_the_word_fall_is_not_going_all_in(self):
+        cons = _Agent(name="Daniel Reyes", tol="conservative",
+                      watchlist=("AAPL", "GOOGL", "NVDA"))
+        for text in (
+            "NVDA's critical supply bottleneck and deliveries at risk, Tesla's "
+            "vehicle recalls, and the recent fall in GOOGL's price warrant "
+            "careful consideration before making any new trade.",
+            "AMD's recent fall indicates potential weakness, further "
+            "confirmation needed before entering a new position.",
+            "A small investment in AAPL would be tall in stature for this account.",
+        ):
+            self.assertEqual(1.0, score_persona_consistency(text, cons, self.HOLD), text)
+
+    def test_going_all_in_still_flags_with_either_spelling(self):
+        cons = _Agent(name="Daniel Reyes", tol="conservative", watchlist=("AAPL",))
+        for text in ("Going all in on AAPL.", "I am all-in on this one."):
+            self.assertLessEqual(score_persona_consistency(text, cons, self.HOLD),
+                                 PERSONA_DRIFT_THRESHOLD, text)
+
+    def test_describing_market_panic_is_not_the_agents_fear(self):
+        aggr = _Agent(name="Kofi Mensah", tol="aggressive", watchlist=("TSLA", "AMD", "GOOGL"))
+        text = ("Current market volatility presents an opportunity for profits. "
+                "The recent SEC filing of Elon Musk selling Tesla shares may "
+                "cause short-term panic, but Goldman Sachs is bullish.")
+        self.assertEqual(1.0, score_persona_consistency(text, aggr, self.HOLD))
+
+    def test_the_agents_own_fear_still_flags(self):
+        aggr = _Agent(name="Kofi Mensah", tol="aggressive", watchlist=("TSLA",))
+        for text in ("I am terrified of this drop.", "I panic when it falls.",
+                     "TSLA is too risky, I will play it safe."):
+            self.assertLessEqual(score_persona_consistency(text, aggr, self.HOLD),
+                                 PERSONA_DRIFT_THRESHOLD, text)
 
 
 class VenueRejection(unittest.TestCase):

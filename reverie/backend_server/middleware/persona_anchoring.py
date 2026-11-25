@@ -20,6 +20,7 @@ Description: Persona anchoring middleware for the trading simulation.
        Logged per step alongside the hallucination and stale-context flags.
 """
 
+import re
 from typing import Optional
 
 
@@ -44,6 +45,20 @@ from typing import Optional
 # minimum observed score of 0.71 -- not a finding, just a metric that could not
 # fire. Use `score <= PERSONA_DRIFT_THRESHOLD` at call sites.
 PERSONA_DRIFT_THRESHOLD = 0.5
+
+# An aggressive agent that HOLDs on more than this fraction of the decisions
+# where it COULD have bought is out of character for the run. The per-decision
+# score cannot see this: a HOLD that names no symbol and uses no fearful phrase
+# passes every check.
+#
+# Only decisions with buying capacity count. Run 07 measured this over all
+# decisions and flagged Marcus Webb in all 8 independent configs, both arms,
+# at 84-96% HOLD -- but he spends his $25k in the first steps, and an
+# aggressive trader holding because he is fully invested is in character. A
+# flag that fires on every config cannot tell the arms apart.
+# shortcut: 0.5 is a judgement call, not calibrated; replace with the baseline
+# arm's measured capacity-hold rate once a sweep on this definition gives one.
+AGGRESSIVE_MAX_HOLD_RATE = 0.5
 
 
 def _normalise_risk_tolerance(raw: Optional[str]) -> str:
@@ -158,11 +173,64 @@ _AGGRESSIVE_WORDS = frozenset({
     "full position", "maximum leverage",
 })
 
+# "maximum position" / "maximum leverage" are aggressive intent when an agent
+# says it will take one ("go to maximum position") and plain risk-management
+# vocabulary when it cites its own limit ("within the maximum position limit").
+# Matched as bare substrings they flagged the second use, and a conservative
+# agent cites its limit all the time: the first nine-agent smoke run (smoke9_mw) scored
+# a conservative HOLD 0.50 for "AAPL and GOOGL are already within the maximum
+# position limit". Phrases that refer to the limit are blanked out before the
+# aggressive-word match, so only an unqualified use still counts.
+# shortcut: "maximum position size" is still flagged -- it is as likely to be
+# intent ("take maximum position size") as a limit, and a wrong guess either
+# way is worse than leaving the phrase out of this list.
+_LIMIT_REFERENCE_RE = re.compile(
+    r"\bmaximum (?:position|leverage)\s+(?:limit|cap|threshold|allowed|allowance)\b"
+    r"|\b(?:within|under|below|near|exceeds?|exceeding|over)\s+"
+    r"(?:the |my |our |its )?maximum (?:position|leverage)\b")
+
+
+def _phrase_regex(words) -> "re.Pattern":
+    """One regex matching any phrase, only as whole words.
+
+    The lists used to be matched with `phrase in text`, which matches inside
+    other words: "all in" is inside "fall in" and "fall indicates", so a
+    conservative agent writing "the recent fall in GOOGL's price" was scored as
+    going all in (two of the three false drift events in the second 100-step
+    nine-agent run). Longest phrases first so "all-in" is tried before "all".
+    """
+    alts = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+    return re.compile(r"\b(?:" + alts + r")\b")
+
+
+def _has_aggressive_language(reasoning_lower: str) -> bool:
+    """True when the reasoning uses an aggressive phrase, ignoring references
+    to the agent's own position/leverage limit."""
+    text = _LIMIT_REFERENCE_RE.sub(" ", reasoning_lower)
+    return bool(_AGGRESSIVE_RE.search(text))
+
+
 _FEARFUL_WORDS = frozenset({
     "too risky", "too scared", "avoid everything", "play it safe",
     "too uncertain", "sit this out", "stay on sidelines", "do nothing",
-    "terrified", "panic",
 })
+
+# "terrified" and "panic" count only as the AGENT's own fear. An aggressive
+# trader writing that a selloff "may cause short-term panic" is describing the
+# market, which is exactly what a risk-seeking trader reads as an opportunity
+# (Kofi Mensah, second 100-step run). A first-person marker a few words before
+# the word is the cheap, readable way to tell the two apart.
+_OWN_FEAR_RE = re.compile(
+    r"\b(?:i|i'm|i am|i feel|i'm feeling|i was|we|we're)\b[^.!?;]{0,25}"
+    r"\b(?:terrified|panick\w*|panic)\b")
+
+_AGGRESSIVE_RE = _phrase_regex(_AGGRESSIVE_WORDS)
+_FEARFUL_RE = _phrase_regex(_FEARFUL_WORDS)
+
+
+def _has_fearful_language(reasoning_lower: str) -> bool:
+    """True when the reasoning says the agent itself is scared or avoiding risk."""
+    return bool(_FEARFUL_RE.search(reasoning_lower) or _OWN_FEAR_RE.search(reasoning_lower))
 
 _STALE_SIGNAL_WORDS = frozenset({
     "as mentioned earlier", "as stated before", "previously noted",
@@ -205,21 +273,59 @@ def _mentions_symbol(reasoning_upper: str, symbol: str) -> bool:
                for alias in _SYMBOL_ALIASES.get(symbol, ()))
 
 
-def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
+def strategy_exits_due(persona, prices: dict) -> set:
+    """
+    Symbols the agent's OWN stop-loss or take-profit says to sell now.
+
+    Read from the persona's stop_loss_pct / take_profit_pct (fractions), which
+    encode rules its strategy text already states ("cut losers at 8% loss
+    without exception"). A persona without them has no exits due. Must be
+    computed BEFORE the step's trade executes: afterwards a compliant sale has
+    removed the position, and compliance would go uncounted.
+    """
+    s = persona.scratch
+    stop = getattr(s, "stop_loss_pct", None)
+    take = getattr(s, "take_profit_pct", None)
+    due = set()
+    if stop is None and take is None:
+        return due
+    for sym, pos in (getattr(s, "positions", None) or {}).items():
+        avg = pos.get("avg_price")
+        if not pos.get("qty") or not avg or sym not in prices:
+            continue
+        change = (prices[sym] - avg) / avg
+        if (stop is not None and change <= -stop) or \
+           (take is not None and change >= take):
+            due.add(sym)
+    return due
+
+
+def score_persona_consistency(reasoning: str, persona,
+                              requested: Optional[dict] = None,
+                              exits_due: Optional[set] = None) -> Optional[float]:
     """
     Heuristic consistency score in [0.0, 1.0], or None when not scoreable.
 
     Checks up to three independent dimensions; each violation subtracts from 1.0:
       - Language-risk mismatch  (aggressive words for conservative agent, etc.)
-      - Watchlist blindness      (agent ignores stocks it's supposed to track)
-      - Circular / stale signal  (agent references prior context as justification)
+      - Watchlist               (BUYING an off-watchlist symbol; when the order
+                                 is unknown, naming only off-watchlist symbols
+                                 in the reasoning. A HOLD or SELL that merely
+                                 mentions an off-watchlist stock is not scored
+                                 on this dimension)
+      - Own exit rules          (a stop-loss or take-profit was due, from
+                                 strategy_exits_due(), and the agent did not
+                                 sell one of those symbols)
 
-    Returns None when there is nothing to score -- either the model produced no
-    reasoning at all (every parser fallback has reasoning="") or the persona
-    defines none of the fields the checks read. Scoring an empty string is not a
-    measurement of character: it violates the watchlist check by construction and
-    passes the other two for free, which is exactly how a decision the model
-    never actually made ended up recorded as in-character.
+    `requested` is the order the model asked for, BEFORE the filter touched it.
+    What the agent tried to do is better evidence of character than what it
+    wrote, and it is scoreable even when the reasoning is empty.
+
+    Returns None when there is nothing to score -- no reasoning and no trade
+    request, or a persona defining none of the fields the checks read. Scoring
+    an empty string is not a measurement of character: it violates the watchlist
+    check by construction and passes the others for free, which is exactly how
+    a decision the model never actually made ended up recorded as in-character.
 
     The denominator counts only the checks that ran. It used to be hard-coded to
     3 even though the language check is skipped for moderate agents, so those
@@ -227,8 +333,7 @@ def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
     """
     s = persona.scratch
     reasoning = (reasoning or "").strip()
-    if not reasoning:
-        return None
+    requested = requested or {}
 
     risk_tolerance  = _normalise_risk_tolerance(getattr(s, "risk_tolerance", None))
     watchlist       = [sym.upper() for sym in getattr(s, "watchlist", [])]
@@ -238,16 +343,44 @@ def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
     violations = 0
     checks     = 0
 
+    # 0. Buying off the watchlist. Only BUY: selling an off-watchlist holding is
+    #    exiting a position, which is in character for any profile. Not a
+    #    hallucination either -- the symbol exists and the order is legal -- so
+    #    this does not double-count anything the filter already reports.
+    #    When it runs it replaces the reasoning-symbol check below, so one act
+    #    is not scored twice for naming the stock it bought.
+    bought = str(requested.get("symbol") or "").upper()
+    buy_checked = (str(requested.get("action") or "").lower() == "buy"
+                   and bool(bought) and bool(watchlist))
+    if buy_checked:
+        checks += 1
+        if bought not in watchlist:
+            violations += 1
+
+    # 0b. Own exit rules. Action against the agent's stated strategy, from the
+    #     portfolio, so it does not depend on wording. Not a hallucination (the
+    #     sale it skipped was legal) and not a state contradiction (that one
+    #     compares reasoning with the book, this compares the action with the
+    #     strategy), so nothing is counted twice.
+    if exits_due:
+        checks += 1
+        sold = (str(requested.get("action") or "").lower() == "sell"
+                and str(requested.get("symbol") or "").upper() in exits_due)
+        if not sold:
+            violations += 1
+
     # 1. Language-risk mismatch — only meaningful when the profile commits to a
     #    direction. Moderate has no characteristic vocabulary to violate, so the
     #    check does not run and must not be counted in the denominator.
-    if risk_tolerance == "conservative":
+    if not reasoning:
+        pass
+    elif risk_tolerance == "conservative":
         checks += 1
-        if any(w in reasoning_lower for w in _AGGRESSIVE_WORDS):
+        if _has_aggressive_language(reasoning_lower):
             violations += 1
     elif risk_tolerance == "aggressive":
         checks += 1
-        if any(w in reasoning_lower for w in _FEARFUL_WORDS):
+        if _has_fearful_language(reasoning_lower):
             violations += 1
 
     # 2. Watchlist blindness — acting on a symbol not in the watchlist
@@ -266,7 +399,18 @@ def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
     #
     # Reasoning that names no symbol at all carries no evidence either way, so
     # the check does not run and is not counted in the denominator.
-    if watchlist:
+    #
+    # NOT run when the order is an explicit HOLD or SELL. Naming an off-watchlist
+    # stock in the reasoning of a HOLD is market commentary, not acting on it: in
+    # the first 100-step nine-agent run a conservative agent that never traded
+    # (watchlist AAPL, GOOGL) was scored 0.50 five times for writing that Tesla
+    # recalls and an NVDA rally were reasons to wait. That is what a cautious
+    # agent says. The act that can contradict a watchlist is a BUY, which the
+    # check at the top of this function already scores from the order itself.
+    # Without an explicit order (requested has no action) the reasoning is all
+    # there is, so the check still runs for those callers.
+    holds_or_exits = str(requested.get("action") or "").lower() in ("hold", "sell")
+    if watchlist and reasoning and not buy_checked and not holds_or_exits:
         watch_up = {s.upper() for s in watchlist}
         mentioned = {sym for sym in _ALL_KNOWN_SYMBOLS
                      if _mentions_symbol(reasoning_upper, sym)}
@@ -291,6 +435,28 @@ def score_persona_consistency(reasoning: str, persona) -> Optional[float]:
     return round(1.0 - violations / checks, 2)
 
 
+def can_buy(persona, market) -> bool:
+    """True when the legal menu offers at least one BUY this step."""
+    from middleware.action_filtering import get_legal_actions
+    return any(a.type == "BUY" for a in get_legal_actions(persona, market))
+
+
+def hold_rate_drift(hold_rate: Optional[float], persona) -> bool:
+    """
+    True when a run's HOLD rate is out of character for the agent's profile.
+
+    `hold_rate` must be over the decisions where can_buy() was True; None (it
+    never could buy) is never drift. Run-level, not per-decision: one HOLD is in
+    character for anyone, holding nearly all run is not for an aggressive
+    trader. Only aggressive commits to a direction here -- a moderate "high
+    conviction only" agent (Alex Chen) holding all run follows his strategy.
+    """
+    if hold_rate is None:
+        return False
+    tol = _normalise_risk_tolerance(getattr(persona.scratch, "risk_tolerance", None))
+    return tol == "aggressive" and hold_rate > AGGRESSIVE_MAX_HOLD_RATE
+
+
 # ---------------------------------------------------------------------------
 # Convenience: inject anchor into an existing memory-context string
 # ---------------------------------------------------------------------------
@@ -299,11 +465,19 @@ def anchor_memory_context(persona, memory_context: str) -> str:
     """
     Prepend the persona anchor to an existing memory context string.
 
-    NOTE: make_trading_decision() calls id_rag.id_rag_anchor() instead, which
-    retrieves only the identity facts relevant to the current context rather
-    than prepending this full static block. This function is kept for callers
-    that want the unconditional anchor (input_stabilizer.py) -- it is no longer
-    on the main decision path, whatever this docstring used to claim.
+    LEGACY. NOT ON ANY CODE PATH, AND HAS NO CALLER AT ALL.
+
+    The pipeline calls id_rag.id_rag_anchor() instead, which retrieves only the
+    identity facts relevant to the current context rather than prepending this
+    full static block. This function's only caller was input_stabilizer.py,
+    which has been deleted: it was the original four-layer orchestrator, it
+    imported four classes that never existed, and it could not be imported.
+
+    Kept rather than deleted because the paper's capstone report describes a
+    "layer 3: persona anchoring", and this is that layer. It is worth being
+    able to point at what the description refers to. What is measured is
+    score_persona_consistency() further up, a post-hoc metric, so layer 3 is a
+    measurement and not an intervention. See middleware/README.md.
     """
     anchor = create_persona_anchor(persona)
     return anchor + memory_context

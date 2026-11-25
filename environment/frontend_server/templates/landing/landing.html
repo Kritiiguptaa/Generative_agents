@@ -2,59 +2,210 @@
 {% load staticfiles %}
 <html lang="en">
 <head>
-	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>Agent Anchor</title>
-	<link rel="stylesheet" href="{% static 'css/trading_ui.css' %}">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Anchor — keep LLM trading agents anchored to the book</title>
+<meta name="description" content="A multi-agent trading floor simulation for measuring, and reducing, LLM hallucination with a middleware action filter.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+<!-- ?v= is a cache buster. The sheets are served by runserver with no
+     fingerprint, and a browser holding the pre-redesign trading_ui.css --
+     which declared its own dark :root -- renders this page half dark.
+     Bump the token whenever a sheet changes. -->
+<link rel="stylesheet" href="{% static 'css/anchor.css' %}?v=20260821b">
 </head>
-<body>
+<body class="page-landing">
 
-<div class="topbar">
-	<div class="brand">Agent<span>Anchor</span></div>
-	<div class="chip">frontend server</div>
-	<div class="spacer"></div>
-	<div class="chip">{{ sims|length }} simulation{{ sims|length|pluralize }}</div>
-</div>
+<nav>
+  <div class="nav-in">
+    <a class="brand" href="/">
+      <span class="mark">A</span>
+      <span>AGENT&nbsp;<b>ANCHOR</b></span>
+    </a>
+    <div class="nav-links">
+      <a class="txt" href="#floor">The floor</a>
+      <a class="txt" href="#how">How it works</a>
+      <a class="txt" href="#runs">Runs</a>
+      {% if runs %}<a class="btn primary sm" href="/run/{{ runs.0.sim_code }}/">Open run explorer</a>{% endif %}
+    </div>
+  </div>
+</nav>
 
-<div class="wrap" style="grid-template-columns: minmax(0, 1fr);">
-	<div class="panel">
-		<div class="panel-head"><span>Simulations</span></div>
-		<div class="log-scroll" style="max-height:none;">
-			<table class="log">
-				<thead>
-					<tr>
-						<th>Sim code</th>
-						<th style="width:260px">Agents</th>
-						<th style="width:80px" class="num">Steps</th>
-						<th style="width:100px" class="num">Decisions</th>
-						<th style="width:90px">State</th>
-						<th style="width:80px"></th>
-					</tr>
-				</thead>
-				<tbody>
-				{% for s in sims %}
-					<tr onclick="location.href='/map/{{ s.sim_code }}/0/'">
-						<td style="color:var(--text)">{{ s.sim_code }}</td>
-						<td>{{ s.personas|join:", " }}</td>
-						<td class="num">{{ s.steps }}</td>
-						<td class="num">{{ s.decisions }}</td>
-						<td>
-							{% if s.is_running %}<span class="badge retry">running</span>
-							{% elif s.decisions %}<span class="badge success">done</span>
-							{% else %}<span class="badge unknown">no data</span>{% endif %}
-						</td>
-						<td><a href="/map/{{ s.sim_code }}/0/">map ↗</a></td>
-					</tr>
-				{% empty %}
-					<tr><td colspan="6" style="color:var(--text-faint); font-style:italic;">
-						Nothing in <code>storage/</code> with a <code>reverie/meta.json</code> yet.
-					</td></tr>
-				{% endfor %}
-				</tbody>
-			</table>
-		</div>
-	</div>
-</div>
+<!-- ══════════════ HERO ══════════════ -->
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="kicker">LLM hallucination · measured, not asserted</span>
+      <h1>An <span class="u">office of trading agents</span>, and a filter that stops the ones that lie.</h1>
+      <p class="lead">
+        Three LLM agents run a trading desk. They hallucinate — symbols that
+        don't exist, cash they don't have, orders the book would reject.
+        <strong>Agent Anchor sits between the model and the market</strong> and
+        records what it caught, so the reduction is a measurement rather than a
+        claim.
+      </p>
+      <div class="btn-row">
+        {% if runs %}
+        <a class="btn primary lg" href="/run/{{ runs.0.sim_code }}/">Read a run ↗</a>
+        <a class="btn ghost lg" href="/map/{{ runs.0.sim_code }}/0/">Watch the floor</a>
+        {% else %}
+        <a class="btn ghost lg" href="#runs">No runs in storage yet</a>
+        {% endif %}
+      </div>
+      <div class="trust">
+        <span><b>{{ runs|length }}</b> trading run{{ runs|length|pluralize }} in storage</span>
+        <span><b>{{ total_decisions }}</b> agent decisions logged</span>
+        <span><b>{{ total_flagged }}</b> flagged as infeasible</span>
+      </div>
+    </div>
+
+    <!-- ── the ANCHOR-1 console ── -->
+    <div id="floor" class="dex">
+      <span class="screw tl"></span><span class="screw tr"></span>
+      <span class="screw bl"></span><span class="screw br"></span>
+
+      <div class="dex-top">
+        <span class="dex-lens"></span>
+        <span class="dex-led coral"></span>
+        <span class="dex-led lemon"></span>
+        <span class="dex-led mint"></span>
+        <span class="dex-title" id="dexTitle">ANCHOR-1 · TRADING FLOOR MONITOR</span>
+        <span class="dex-enc">◉ REC</span>
+      </div>
+
+      <div class="dex-body">
+        <div class="dex-sim">
+          <canvas id="floorCanvas" width="352" height="240"
+                  aria-label="Pixel trading floor replaying the run: agents at their desks send order tickets to the market board, and the ones the filter flagged are stamped BLOCKED before they arrive."></canvas>
+          <div class="dex-hint">REPLAYING THE RUN · CLICK AN AGENT</div>
+        </div>
+        <div class="dex-hinge" aria-hidden="true"><i></i><i></i><i></i></div>
+        <aside class="dex-card" aria-label="Selected agent's desk card">
+          <div class="idc">
+            <div class="idc-head"><span>AGENT&nbsp;ANCHOR</span><span id="idSerial">DESK&nbsp;#01</span></div>
+            <div>
+              <div class="idc-name" id="idName">—</div>
+              <div class="idc-role" id="idRole">no run loaded</div>
+            </div>
+            <dl class="idc-rows">
+              <div class="r"><dt>RUN</dt><dd id="idRun">—</dd></div>
+              <div class="r"><dt>WATCHING</dt><dd id="idWatch">—</dd></div>
+              <div class="r"><dt>TRADES</dt><dd id="idTrades">—</dd></div>
+              <div class="r"><dt>HOLDS</dt><dd id="idHolds">—</dd></div>
+              <div class="r"><dt>FLAGGED</dt><dd id="idFlag">—</dd></div>
+              <div class="r"><dt>LAST</dt><dd id="idLast">—</dd></div>
+            </dl>
+            <div class="idc-bar" aria-hidden="true"></div>
+            <div class="idc-tabs" id="idTabs" role="tablist" aria-label="Pick an agent"></div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="dex-ctrl">
+        <span class="dpad" aria-hidden="true"></span>
+        <div class="st-btns" role="group" aria-label="Pick a run to preview" id="stBtns"></div>
+        <span class="dex-read" id="dexRead">NO SIGNAL</span>
+        <span class="dex-spk" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ══════════════ HOW IT WORKS ══════════════ -->
+<section id="how">
+  <div class="wrap">
+    <div class="sec-head center">
+      <span class="kicker">HOW IT WORKS</span>
+      <h2>Three layers between a model and a trade.</h2>
+      <p>Every order an agent proposes is written down twice — once as the model
+         asked for it, once as the book accepted it. The gap between those two
+         is the whole experiment.</p>
+    </div>
+    <div class="grid-3">
+      <div class="card step">
+        <span class="num">1</span>
+        <h3>The agents decide</h3>
+        <p>Three personas with their own strategy, risk tolerance and watchlist
+           read the market each step and return an order as JSON. Nothing
+           constrains them yet — this is the raw model.</p>
+      </div>
+      <div class="card step">
+        <span class="num">2</span>
+        <h3>The filter checks</h3>
+        <p>Middleware validates the order against the legal action list, the
+           agent's real cash and its real positions. Anything infeasible is
+           logged with its kind and stopped before it reaches the book.</p>
+      </div>
+      <div class="card step">
+        <span class="num">3</span>
+        <h3>The run is read back</h3>
+        <p>The run explorer replays every step with what was requested next to
+           what executed, so a flagged order can be inspected rather than
+           taken on trust.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ RUNS ══════════════ -->
+<section id="runs">
+  <div class="wrap">
+    <div class="sec-head center">
+      <span class="kicker">STORAGE</span>
+      <h2>Every run on this machine.</h2>
+      <p>Each card opens either the replayable floor or the run explorer.
+         Counts come straight from the run's own decision log.</p>
+    </div>
+
+    {% if runs %}
+    <div class="runs">
+      {% for s in runs %}
+      <div class="card run">
+        <div class="run-top">
+          <span class="run-code">{{ s.sim_code }}</span>
+          {% if s.is_running %}<span class="state live">live</span>
+          {% elif s.decisions %}<span class="state done">complete</span>
+          {% else %}<span class="state">no data</span>{% endif %}
+        </div>
+        <div class="run-agents">{{ s.personas|join:" · "|default:"no personas recorded" }}</div>
+        <div class="run-figs">
+          <div><b>{{ s.steps }}</b><span>steps</span></div>
+          <div><b>{{ s.decisions }}</b><span>decisions</span></div>
+          <div class="flag"><b>{{ s.console.flagged }}</b><span>flagged</span></div>
+        </div>
+        <div class="run-links">
+          <a href="/map/{{ s.sim_code }}/0/">WATCH FLOOR</a>
+          <a href="/run/{{ s.sim_code }}/">RUN EXPLORER</a>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+      No run in <code>storage/</code> has a decision log yet.
+    </div>
+    {% endif %}
+
+    {% if other %}
+    <div class="runs-other">
+      <span class="lbl">Also in storage — village sims and runs with no decisions</span>
+      {% for s in other %}<span class="o">{{ s.sim_code }}</span>{% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-in">
+    <span>Agent Anchor — a fork of Stanford's Generative Agents, repurposed as a trading floor.</span>
+    <span class="spacer"></span>
+    <span class="mono">local frontend server</span>
+  </div>
+</footer>
+
+<script id="consoleData" type="application/json">{{ sims_json|safe }}</script>
+<script src="{% static 'js/anchor_console.js' %}?v=20260821b"></script>
 
 </body>
 </html>

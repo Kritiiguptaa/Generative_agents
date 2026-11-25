@@ -72,8 +72,12 @@ from trading_persona    import TradingPersona
 from trading_daily_plan import ensure_daily_plan, apply_interaction_to_plan, current_focus_str
 from trading_interactions import maybe_interaction
 from middleware.action_filtering    import (
-    run_action_filtering_step,
+    # run_action_filtering_step is deliberately NOT imported: the decision step
+    # is composed by MiddlewareWrapper.decide(). The helpers below are used by
+    # the baseline arm's free_form_decision() and by the executor, which are
+    # not pipeline composition.
     log_action,
+    is_server_error,
     _parse_json_response,
     _split_combined_action,
     _market_is_open,
@@ -84,13 +88,28 @@ from middleware.action_filtering    import (
 from middleware.persona_anchoring   import (
     score_persona_consistency,
     PERSONA_DRIFT_THRESHOLD,
+    hold_rate_drift,
+    strategy_exits_due,
+    can_buy,
 )
-from middleware.memory_compression  import compress_memories
 from middleware.id_rag import (
-    id_rag_anchor,
+    # id_rag_anchor is deliberately NOT imported here. The input-side steps are
+    # composed by MiddlewareWrapper.prepare(); calling them directly from a
+    # harness is what let the two harnesses drift. The graph updates below are
+    # step-level lifecycle, not pipeline composition, so they stay.
     update_graph_belief,
     update_graph_relationship,
     update_graph_current_situation,
+)
+from middleware.middleware_wrapper import (
+    MiddlewareWrapper,
+    WrapperConfig,
+    raw_memory_context,
+)
+from middleware.metrics_recorder import (
+    collect_run_metadata,
+    format_meta_lines,
+    recorder_from_trading_log,
 )
 
 from persona.cognitive_modules.retrieve import new_retrieve
@@ -116,40 +135,25 @@ def build_memory_context(retrieved: dict,
     Returns (memory_context, compression_stats).
     """
     if use_middleware:
-        # Middleware layer: compress the retrieval output before it reaches the
-        # LLM. Replaces the old arbitrary nodes[:6] truncation.
-        memory_context, mc_stats = compress_memories(retrieved, persona, market)
-
-        # ID-RAG: retrieve only the identity facts relevant to this context
-        # and prepend them. Replaces the static full-block anchor.
-        memory_context = id_rag_anchor(persona, memory_context)
-        return memory_context, mc_stats
+        # Both input-side steps, compression then ID-RAG, now run inside
+        # MiddlewareWrapper.prepare(). They used to be called here and again in
+        # paired_eval.py, which is how run 06's defect 2 happened: one harness
+        # omitted the ID-RAG updates and silently ran a different middleware.
+        # One composition point, so there is nothing left to forget.
+        wrapper = MiddlewareWrapper()
+        prepared = wrapper.prepare(persona, market, retrieved)
+        return prepared.memory_context, prepared.compression_stats
 
     # Baseline: hand the LLM everything new_retrieve() returned, verbatim.
     # No dedup, no supersession pruning, no budget -- this is the raw
     # context the middleware exists to clean up.
-    raw_nodes = []
-    for nodes in retrieved.values():
-        raw_nodes.extend(nodes)
-    memory_context = "\n".join(n.description for n in raw_nodes)
-    # Report the size of the context even though nothing compressed it. This
-    # arm was observed choosing "analyze" on 100% of decisions, and the
-    # leading hypothesis is that the uncompressed block is large enough to
-    # crowd out the instruction -- untestable while the stats said only
-    # {"enabled": False}. nodes_out == nodes_in because nothing was dropped.
-    mc_stats = {
-        "enabled":           False,
-        "nodes_in":          len(raw_nodes),
-        "nodes_out":         len(raw_nodes),
-        "dropped_duplicate": 0,
-        "dropped_stale":     0,
-        "dropped_budget":    0,
-        "annotated_stale":   0,
-        "compression_ratio": 1.0,
-        "chars_in":          len(memory_context),
-        "chars_out":         len(memory_context),
-    }
-    return memory_context, mc_stats
+    #
+    # The concatenation and its stats live in middleware_wrapper so that the
+    # compression-disabled ablation arm and this arm cannot drift apart; the
+    # behaviour is unchanged, which tests/golden/ proves. This arm is NOT
+    # routed through the wrapper itself: it is the control, and an arm assembled
+    # from zero components would resemble it without being it.
+    return raw_memory_context(retrieved)
 
 
 def make_trading_decision(persona: TradingPersona,
@@ -158,7 +162,9 @@ def make_trading_decision(persona: TradingPersona,
                           action_log_path: str,
                           use_middleware: bool = True,
                           seed: int = None,
-                          temperature: float = 0.0) -> dict:
+                          temperature: float = 0.0,
+                          components=None,
+                          baseline_states_risk_cap: bool = False) -> dict:
     """
     Ask the LLM to decide what to do next.
     Returns (decision, compression_stats, filter_stats), where decision is
@@ -178,9 +184,6 @@ def make_trading_decision(persona: TradingPersona,
       downstream code (execute_trading_action, _check_stale_reasoning,
       score_persona_consistency, _generate_report).
     """
-    memory_context, mc_stats = build_memory_context(
-        retrieved, persona, market, use_middleware)
-
     def _call_llm(prompt: str) -> str:
         # format="json": grammar-constrained decoding. phi3:mini otherwise
         #   intermittently emits invalid JSON syntax (bare `end="..."` keys,
@@ -202,21 +205,33 @@ def make_trading_decision(persona: TradingPersona,
                               temperature=temperature, seed=seed)
 
     if use_middleware:
-        decision, filter_stats = run_action_filtering_step(
-            persona,
-            market,
-            memory_context,
-            _call_llm,
-            action_log_path,
-        )
-    else:
-        decision, filter_stats = free_form_decision(
-            persona,
-            market,
-            memory_context,
-            _call_llm,
-            action_log_path,
-        )
+        # One composition point for the whole middleware arm: prepare() runs
+        # compression and ID-RAG, decide() runs the legal-action filter with its
+        # single retry and HOLD fallback. The wrapper delegates to the same
+        # functions this code called before and adds no logic of its own, so
+        # the default path is unchanged; tests/golden/ holds it to that.
+        # components=None means the shipped arm, all three stages. A component
+        # set makes this an ABLATION arm, which must never be reported as the
+        # middleware; WrapperConfig.is_full_middleware marks the difference.
+        config = (WrapperConfig(components=frozenset(components))
+                  if components else None)
+        wrapper = MiddlewareWrapper(config=config,
+                                    action_log_path=action_log_path)
+        prepared = wrapper.prepare(persona, market, retrieved)
+        outcome = wrapper.decide(prepared, _call_llm)
+        return outcome.decision, outcome.compression_stats, outcome.stats
+
+    # Baseline arm keeps its own path, deliberately outside the wrapper.
+    memory_context, mc_stats = build_memory_context(
+        retrieved, persona, market, use_middleware=False)
+    decision, filter_stats = free_form_decision(
+        persona,
+        market,
+        memory_context,
+        _call_llm,
+        action_log_path,
+        state_risk_cap=baseline_states_risk_cap,
+    )
     return decision, mc_stats, filter_stats
 
 
@@ -224,7 +239,8 @@ def free_form_decision(persona: TradingPersona,
                        market:  MarketEnvironment,
                        memory_context: str,
                        llm_call,
-                       action_log_path: str) -> dict:
+                       action_log_path: str,
+                       state_risk_cap: bool = False) -> dict:
     """
     Baseline (no-middleware) decision path.
 
@@ -259,12 +275,33 @@ def free_form_decision(persona: TradingPersona,
     s = persona.scratch
     tradeable = _get_tradeable_symbols(persona, market)
     market_open = "OPEN" if _market_is_open(market) else "CLOSED"
+
+    # WP5. Off by default, so the prompt is byte-identical to every run so far.
+    #
+    # The baseline prompt gives only a risk WORD ("moderate") while the
+    # middleware prompt prints the maximum legal quantity, so part of the
+    # baseline's resizing may be the model breaking a limit it was never told:
+    # in run 06, 10 of 18 resized baseline orders were clamped for the risk cap
+    # and 8 for holdings. This flag closes that information gap, which is the
+    # "unequal information" limitation.
+    #
+    # It states the LIMIT, not the computed maximum quantity. Giving the number
+    # of shares would hand the baseline the filter's arithmetic and stop it
+    # being a baseline; the agent must still do the multiplication itself.
+    risk_cap_line = ""
+    if state_risk_cap:
+        limit = float(getattr(s, "risk_limit_per_trade", 0.0) or 0.0)
+        if limit > 0:
+            risk_cap_line = (
+                f"Your risk limit is {limit * 100:.0f}% of your portfolio "
+                f"value on any single trade. Do not exceed it.\n")
+
     prompt = f"""You are {s.name}, a {getattr(s, 'trader_type', None) or 'generalist'} trader.
 Traits: {getattr(s, 'innate', '')}
 Background: {getattr(s, 'learned', '')}
 Current situation: {getattr(s, 'currently', '')}
 Risk tolerance: {getattr(s, 'risk_tolerance', '')}
-
+{risk_cap_line}
 Current state:
 - Cash: ${s.cash_balance:,.2f}
 - Holdings: {s.positions}
@@ -643,6 +680,74 @@ _NEWS_STOPWORDS = frozenset({
     "supply", "deliveries", "safety", "filing", "print",
 })
 
+def build_order_feedback(name: str,
+                         requested: dict,
+                         illegal_request: bool,
+                         error_reason: str,
+                         result: dict,
+                         cash: float) -> str:
+    """
+    Compose the memory note that tells an agent its order was refused.
+
+    Returns "" when there is nothing to report, in which case the caller writes
+    no memory at all.
+
+    WHY THIS IS A SHARED FUNCTION AND NOT INLINE
+    It used to be written out twice, once in TradingReverie._step_agent and once
+    in PairedEvaluation._step_agent, and the two copies did not agree. The
+    runner named the specific reason and distinguished a rejected order from a
+    clamped one; the paired harness had a single branch emitting a generic
+    "REJECTED/ADJUSTED" on a different trigger condition. Same event, different
+    memory, so the two harnesses' agents diverged from the first rejection
+    onward while appearing to run identical configurations. That is the same
+    class of fault as run 06's defect 2, which was a paired harness silently
+    running a different middleware. One definition, two callers, so it cannot
+    recur.
+
+    WHY THE WORDING MATTERS AT ALL
+    This string becomes a memory node, so it enters retrieval and shapes every
+    later decision. Feeding rejections back is also the thing that broke the
+    run-05 livelock, where 48 of Alex Chen's rejections collapsed into a single
+    distinct episode because nothing in memory recorded that the order had
+    failed (CHANGES.md 23.7). It is load bearing, not cosmetic.
+
+    ARGS
+      name:            agent name, used in the note's text.
+      requested:       the pre-correction request, from stats["requested"].
+      illegal_request: True when the model asked for an illegal trade, as
+                       opposed to merely emitting malformed JSON.
+      error_reason:    the validator's reason, from stats["error_reason"].
+      result:          the execute_trading_action() result dict.
+      cash:            the agent's cash balance after execution.
+
+    The three branches are mutually exclusive and ordered deliberately:
+      1. an illegal trade request, caught before execution;
+      2. an order the executor refused outright;
+      3. an order the executor resized and then filled anyway.
+    is_trade_request() rather than a plain action check, because a request
+    rejected as "action type is invalid" otherwise got no feedback at all and
+    the agent reinvented the same bad verb on the next step forever.
+    """
+    if illegal_request and is_trade_request(requested):
+        return (
+            f"{name}'s order to {requested['action']} "
+            f"{requested.get('quantity')} {requested.get('symbol')} "
+            f"was REJECTED: "
+            f"{error_reason or 'not a permitted action'}. "
+            f"Cash ${cash:,.0f}. "
+            f"Do not repeat this order unless the position or cash changes.")
+    if result["filtered"]:
+        return (
+            f"{name}'s order was REJECTED: {result['outcome_str']} "
+            f"Do not repeat this order unless the position or cash changes.")
+    if result["hallucination"] and result["filled_quantity"]:
+        return (
+            f"{name} requested {result['requested_quantity']} shares but "
+            f"only {result['filled_quantity']} were permitted; the order "
+            f"was reduced. Cash ${cash:,.0f}.")
+    return ""
+
+
 # How old a headline must be before citing it is even potentially stale.
 STALE_MIN_AGE_STEPS = 20
 # How many distinctive tokens from one headline the reasoning must contain
@@ -898,11 +1003,18 @@ class TradingReverie:
 
     def __init__(self, sim_code: str, fork_sim_code: str = "base_trading",
                  use_middleware: bool = True, fresh: bool = False,
-                 seed: int = 42, temperature: float = 0.7):
+                 seed: int = 42, temperature: float = 0.7,
+                 components=None,
+                 baseline_states_risk_cap: bool = False):
         self.sim_code       = sim_code
         self.fork_sim_code  = fork_sim_code
         self.use_middleware = use_middleware
         self.seed           = seed
+        # None means the shipped middleware, all three stages. A component set
+        # makes this an ablation arm; see MiddlewareWrapper. Both default to
+        # the behaviour every run so far has had.
+        self.components     = components
+        self.baseline_states_risk_cap = baseline_states_risk_cap
         # Decision-call sampling temperature. MUST be > 0 for --seed to reach
         # agent behaviour at all: greedy decoding ignores the seed, which is
         # why run 06's four seeds produced an effectively single middleware
@@ -1071,6 +1183,25 @@ class TradingReverie:
             json.dump(report, f, indent=2)
         self._print_report(report)
 
+        # Recorder artefacts, written alongside the existing report rather than
+        # instead of it. hallucination_report.json keeps its shape because the
+        # frontend and the Run 06 analysis scripts read it; these two files are
+        # additive.
+        #
+        # metrics_events.jsonl is one event per line, so a run killed mid-write
+        # loses one line rather than the file, and metrics_summary.json is
+        # written to a temporary file and renamed, so a disk-full cannot leave
+        # a truncated summary that still parses. Run 07 died on ENOSPC while
+        # the client reported 99 GB free.
+        recorder = recorder_from_trading_log(
+            log,
+            arm="middleware" if self.use_middleware else "baseline",
+            config_name=self.sim_code,
+        )
+        recorder.record_meta(**(report.get("run_metadata") or {}))
+        recorder.write_events(str(sim_path / "reverie" / "metrics_events.jsonl"))
+        recorder.write_summary(str(sim_path / "reverie" / "metrics_summary.json"))
+
         # Run is done -- flip the live flag off so frontend pollers stop.
         last_step = log[-1]["step"] if log else self.market.step
         self._write_run_status(last_step, running=False)
@@ -1132,6 +1263,8 @@ class TradingReverie:
             use_middleware=self.use_middleware,
             seed=self.seed,
             temperature=self.temperature,
+            components=self.components,
+            baseline_states_risk_cap=self.baseline_states_risk_cap,
         )
         print(f"  [{name}] decision: {decision.get('action','?')} "
               f"{decision.get('symbol','')} x{decision.get('quantity','')}")
@@ -1141,6 +1274,11 @@ class TradingReverie:
                   f"(dup={mc_stats['dropped_duplicate']} "
                   f"stale={mc_stats['dropped_stale']} "
                   f"budget={mc_stats['dropped_budget']})")
+
+        # Persona state BEFORE the trade: a compliant stop-loss sale removes
+        # the position, so measured afterwards the rule would look never due.
+        exits_due  = strategy_exits_due(persona, self.market.current_prices)
+        could_buy  = can_buy(persona, self.market)
 
         # 6. Execute (with action filtering)
         result = execute_trading_action(persona, self.market, decision)
@@ -1186,31 +1324,18 @@ class TradingReverie:
 
         # 7b. Feed the failure back so the agent can see it happened. Both arms,
         # for the reason documented on record_order_feedback().
-        feedback = ""
         req = filter_stats.get("requested") or {}
-        # is_trade_request, not ("buy", "sell"): an agent whose request was
-        # rejected as "action type is invalid" got NO feedback under the old
-        # gate, so nothing in its memory recorded that the verb it invented does
-        # not exist -- and it asked again on the next step, forever. That is
-        # exactly the run-05 livelock, where Alex Chen's 48 rejections collapsed
-        # into 1 distinct episode. Feeding the rejection back is the only thing
-        # that can break it.
-        if illegal_request and is_trade_request(req):
-            feedback = (
-                f"{name}'s order to {req['action']} {req.get('quantity')} "
-                f"{req.get('symbol')} was REJECTED: "
-                f"{filter_stats.get('error_reason') or 'not a permitted action'}. "
-                f"Cash ${persona.scratch.cash_balance:,.0f}. "
-                f"Do not repeat this order unless the position or cash changes.")
-        elif result["filtered"]:
-            feedback = (
-                f"{name}'s order was REJECTED: {outcome} "
-                f"Do not repeat this order unless the position or cash changes.")
-        elif result["hallucination"] and result["filled_quantity"]:
-            feedback = (
-                f"{name} requested {result['requested_quantity']} shares but "
-                f"only {result['filled_quantity']} were permitted; the order "
-                f"was reduced. Cash ${persona.scratch.cash_balance:,.0f}.")
+        # Shared with PairedEvaluation._step_agent. These branches used to be
+        # written out here and again there, and the two copies disagreed: see
+        # build_order_feedback() for what diverged and why it mattered.
+        feedback = build_order_feedback(
+            name=name,
+            requested=req,
+            illegal_request=illegal_request,
+            error_reason=filter_stats.get("error_reason") or "",
+            result=result,
+            cash=persona.scratch.cash_balance,
+        )
         if feedback:
             record_order_feedback(persona, self.market, feedback)
 
@@ -1233,9 +1358,12 @@ class TradingReverie:
             print(f"  [{name}] *** STATE CONTRADICTION *** {grounding_flag}")
 
         # 8b. Persona consistency — did the LLM stay in character?
-        # None means "not scoreable" (no reasoning was produced at all), which
+        # Scored on the pre-filter request as well as the reasoning, so what
+        # the agent TRIED to buy counts even when the filter blocked it.
+        # None means "not scoreable" (no reasoning and no trade request), which
         # is distinct from "scored badly" and must not be averaged in as either.
-        drift_score = score_persona_consistency(reasoning, persona)
+        drift_score = score_persona_consistency(reasoning, persona, req,
+                                                exits_due)
         if drift_score is not None and drift_score <= PERSONA_DRIFT_THRESHOLD:
             print(f"  [{name}] *** PERSONA DRIFT *** consistency score "
                   f"{drift_score:.2f} (reasoning may contradict agent profile)")
@@ -1271,6 +1399,13 @@ class TradingReverie:
             # Recorded per step so the report can use it as the denominator
             # instead of counting unscoreable decisions as passes.
             "has_reasoning":       bool((reasoning or "").strip()),
+            # Whether a BUY was legal this step, for the capacity hold rate.
+            "could_buy":           could_buy,
+            # Which of the agent's OWN exit rules were due BEFORE the trade. Stored
+            # because positions in this entry are logged after execution, so the
+            # exit-rule dimension of the persona score cannot be rebuilt offline
+            # without it (analyze_sweep.py --rescore reads it).
+            "exits_due":           sorted(exits_due),
             "stale_context":       stale_flag,
             "state_contradiction": grounding_flag,
             "persona_drift_score": drift_score,
@@ -1324,6 +1459,8 @@ class TradingReverie:
                 "stale_context_hits":    0,
                 "state_contradictions":  0,
                 "drift_scores":          [],  # persona_drift_score per step
+                "capacity_decisions":    0,   # decisions where a BUY was legal
+                "capacity_holds":        0,   # ...of which the agent held
                 "mc_nodes_in":           0,
                 "mc_nodes_out":          0,
                 "mc_dropped_duplicate":  0,
@@ -1356,6 +1493,9 @@ class TradingReverie:
 
             ag["total_decisions"] += 1
             ag["action_counts"][action] = ag["action_counts"].get(action, 0) + 1
+            if entry.get("could_buy"):
+                ag["capacity_decisions"] += 1
+                ag["capacity_holds"] += action == "hold"
 
             if action in ("buy", "sell"):
                 ag["active_decisions"] += 1
@@ -1372,10 +1512,20 @@ class TradingReverie:
             if is_trade_request(requested):
                 ag["trade_attempts"] += 1
 
-            if entry.get("filter_status") == "fallback":
+            # A server failure is not a parser fallback. The sentinel a dead
+            # server returns is not valid JSON, so it reached the validator and
+            # was recorded as the model failing to produce JSON; counting it
+            # here would attribute an outage to the model. It is reported under
+            # its own total instead. Run 06 saw 0 of these, so its fallback
+            # figures are unchanged.
+            server_failed = is_server_error(entry.get("error_reason"))
+
+            if entry.get("filter_status") == "fallback" and not server_failed:
                 ag["fallback_decisions"] += 1
 
             if entry.get("filter_status") in ("retry", "fallback"):
+                # Still tallied by reason, so a run with a flaky server can be
+                # diagnosed from the breakdown rather than looking clean.
                 ag["error_reasons"][entry.get("error_reason") or "unspecified"] += 1
 
             if entry.get("has_reasoning"):
@@ -1467,6 +1617,11 @@ class TradingReverie:
             abstention_rate = round(ag["action_counts"].get("hold", 0)
                                     / total * 100, 1)
 
+            # HOLD rate over the decisions where a BUY was legal; None if never.
+            capacity_hold_pct = (
+                round(ag["capacity_holds"] / ag["capacity_decisions"] * 100, 1)
+                if ag["capacity_decisions"] else None)
+
             # drift_scores only ever collects non-None values, so this averages
             # over decisions that were actually scoreable.
             scores = ag["drift_scores"]
@@ -1501,6 +1656,12 @@ class TradingReverie:
                 "avg_persona_consistency":      avg_drift,
                 "persona_drift_events":         drift_events,
                 "scored_decisions":             len(scores),
+                # Run-level: an aggressive agent holding most of the run. The
+                # per-decision score cannot see this; see hold_rate_drift().
+                "capacity_hold_rate_pct":       capacity_hold_pct,
+                "persona_hold_drift":           hold_rate_drift(
+                    None if capacity_hold_pct is None
+                    else capacity_hold_pct / 100, self.personas[name]),
                 "memory_compression": {
                     "nodes_in":          ag["mc_nodes_in"],
                     "nodes_out":         ag["mc_nodes_out"],
@@ -1524,19 +1685,54 @@ class TradingReverie:
             }
             total_hallucinations += ag["action_hallucinations"]
 
-        total_decisions = sum(a["total_decisions"] for a in per_agent.values())
-        total_attempts  = sum(a["trade_attempts"]  for a in per_agent.values())
-        total_caught    = sum(a["caught_pre_execution"] for a in per_agent.values())
-        total_executed  = sum(a["executed_malformed"]   for a in per_agent.values())
+        # The cross-arm totals come from MetricsRecorder, which holds one
+        # definition of each. These same quantities are also computed by
+        # paired_eval's report, and two copies of a metric definition are how
+        # the two reports came to disagree: this one gained abstention and a
+        # non-participant warning and the paired one never did.
+        #
+        # The recorder is built from the log that was just produced, and the
+        # equivalence is asserted on real runs of both arms in
+        # tests/test_metrics_recorder.py, so this reads the same numbers the
+        # inline sums produced. The per-agent breakdown below stays inline: it
+        # exists only here, so it is not duplication.
+        metrics = recorder_from_trading_log(
+            log,
+            arm="middleware" if self.use_middleware else "baseline",
+            config_name=self.sim_code,
+        ).summary()
+
+        total_decisions = metrics["abstention"]["denominator"]
+        total_attempts  = metrics["trade_attempts"]["count"]
+        total_caught    = metrics["caught_pre_execution"]["count"]
+        total_executed  = metrics["executed_malformed"]["count"]
         total_episodes  = sum(s["hallucination_episodes"] for s in summary.values())
         total_contra    = sum(a["state_contradictions"] for a in per_agent.values())
         total_reasoned  = sum(a["reasoned_decisions"]   for a in per_agent.values())
         total_holds     = sum(a["action_counts"].get("hold", 0)
                               for a in per_agent.values())
         participating   = sum(1 for a in per_agent.values() if a["trade_attempts"])
+        # Server failures, counted apart from the model's parse failures. A
+        # dead server returns a sentinel that is not valid JSON, so without
+        # this split it was recorded as the model failing to produce JSON and
+        # inflated the parser-fallback rate. Run 06 was clean (0 OLLAMA ERROR
+        # in all 16 configs), so its figures are unchanged by the distinction.
+        total_server_errors = sum(
+            1 for e in log if is_server_error(e.get("error_reason")))
+
         return {
             "middleware_enabled":          self.use_middleware,
             "simulation_steps":            n_steps,
+            # What produced this report. Previously absent, which meant two
+            # runs differing only in sampling settings produced
+            # indistinguishable artefacts.
+            "run_metadata":                collect_run_metadata(
+                temperature=self.temperature,
+                seed=self.seed,
+                steps=n_steps,
+                config_name=self.sim_code,
+            ),
+            "total_server_errors":         total_server_errors,
             "total_log_entries":           len(log),
             "total_decisions":             total_decisions,
             "total_trade_attempts":        total_attempts,
@@ -1576,7 +1772,19 @@ class TradingReverie:
         print(f"Middleware      : "
               f"{'ENABLED' if report.get('middleware_enabled') else 'DISABLED (baseline)'}")
         print(f"Steps simulated : {report['simulation_steps']}")
+        # Appended beneath the existing header lines, never interleaved with
+        # them and never renaming one: the Run 06 log parser matches on those
+        # labels and must keep working on new logs.
+        for line in format_meta_lines(report.get("run_metadata") or {}):
+            print(line)
         print(f"Total decisions : {report['total_log_entries']}")
+        # Printed next to the decision count rather than among the
+        # hallucination figures, because a server error is not a model failure
+        # and should not be read as one.
+        if report.get("total_server_errors"):
+            print(f"Server errors   : {report['total_server_errors']}  "
+                  f"(infrastructure, NOT counted as hallucinations or "
+                  f"parser fallbacks)")
         overall = report["overall_hallucination_rate_pct"]
         if overall is None:
             print(f"Total hallucinations : {report['total_hallucinations']}  "
@@ -1648,7 +1856,7 @@ class TradingReverie:
                                                   key=lambda kv: -kv[1]))
                 print(f"      validation errors: {reasons}")
             print(f"    Decisions w/ reasoning: {ag['reasoned_decisions']}  "
-                  f"(the only ones stale/drift can score)")
+                  f"(the only ones stale can score)")
             stale_pct = ag["stale_context_rate_pct"]
             stale_str = ("N/A (no reasoning produced)" if stale_pct is None
                          else f"{stale_pct}% of {ag['reasoned_decisions']} reasoned")
@@ -1684,7 +1892,12 @@ class TradingReverie:
                   f"analyze={dist.get('analyze',0)}")
             print(f"    Abstention     : {ag.get('abstention_rate_pct', 0)}% HOLD"
                   + ("" if ag.get("participated", True)
-                     else "   <- NON-PARTICIPANT: requested no trades all run"))
+                     else "   <- NON-PARTICIPANT: requested no trades all run")
+                  + ("   <- PERSONA DRIFT: aggressive profile, held most of the "
+                     "steps it could buy" if ag.get("persona_hold_drift") else ""))
+            if ag.get("capacity_hold_rate_pct") is not None:
+                print(f"    Hold when able : {ag['capacity_hold_rate_pct']}% "
+                      f"of decisions where a BUY was legal")
             print(f"    Portfolio PnL  : ${ag['pnl_usd']:+,.2f}  "
                   f"(${ag['start_portfolio_usd']:,.0f} -> ${ag['end_portfolio_usd']:,.0f})")
             print()
@@ -1751,12 +1964,45 @@ def main():
                              "model decodes greedily and every seed replays "
                              "the same decisions (run 06). Use 0 only to "
                              "reproduce a pre-run-07 result.")
+    parser.add_argument("--components", default=None,
+                        help="ABLATION ARM. Comma-separated subset of "
+                             "compression,idrag,filter. Omit for the shipped "
+                             "middleware, which is all three. Naming a subset "
+                             "produces a research arm that answers what one "
+                             "stage contributes; it is NOT the middleware and "
+                             "its numbers must not be reported as such. "
+                             "Ignored with --no-middleware, since the baseline "
+                             "has no stages to select.")
+    parser.add_argument("--baseline-states-risk-cap", action="store_true",
+                        help="Baseline arm only. Add the persona's numeric "
+                             "per-trade risk limit to the prompt in prose. The "
+                             "baseline otherwise gets only a risk word while "
+                             "the middleware prompt prints the maximum legal "
+                             "quantity, so some of the baseline's resized "
+                             "orders may break a limit it was never told. The "
+                             "computed maximum quantity is still withheld, so "
+                             "the agent does its own arithmetic. Off by "
+                             "default: switching it on makes results "
+                             "incomparable to earlier runs, so use a new sim "
+                             "name.")
     args = parser.parse_args()
+
+    # Parsed here rather than in TradingReverie so a typo fails before the fork
+    # is copied and GPU time is spent. WrapperConfig rejects unknown names.
+    components = None
+    if args.components:
+        components = frozenset(
+            c.strip() for c in args.components.split(",") if c.strip())
+        WrapperConfig(components=components)   # validates, raises on a typo
+        print(f"[TradingReverie] ABLATION ARM: components="
+              f"{sorted(components)} -- this is NOT the shipped middleware")
 
     sim = TradingReverie(args.sim, args.fork,
                          use_middleware=not args.no_middleware,
                          fresh=args.fresh, seed=args.seed,
-                         temperature=args.temperature)
+                         temperature=args.temperature,
+                         components=components,
+                         baseline_states_risk_cap=args.baseline_states_risk_cap)
     sim.run(args.steps)
 
 

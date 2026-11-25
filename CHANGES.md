@@ -3,13 +3,47 @@
 Working log of what was changed, what was deliberately left alone, and what is
 still open. Written for the trading-sim work on branch `armaans-frontend`.
 
-**Status as of the latest entry (2026-08-18):** runs 02–05 are done and analysed.
-The run-05 fixes are committed (`264db38`, `4c6897e`). **Run 06 — the first
-multi-seed sweep — has landed and been analysed (§23).** It produced one claim
-that survives and three defects that invalidate most of the rest; the fixes for
-all three are committed (`f2ea081`) and **run 07 is the re-run, now executing on
-the DGX**. The seed fix is confirmed working on real hardware (§24.4). The
-frontend was rebuilt in `010960f`.
+**Status as of 2026-11-23:** runs 02–05 are done and analysed. The run-05 fixes
+are committed (`99f36ff`, `4c6897e`). **Run 06 — the first multi-seed sweep —
+has landed and been analysed (§23).** It produced one claim that survives and
+three defects that invalidate most of the rest; the fixes for all three are
+committed (`43a2d40`). The seed fix is confirmed working on real hardware
+(§24.4). The frontend was rebuilt in `010960f`.
+
+**Run 07 has NOT been run.** An earlier version of this file said it was
+"executing on the DGX" as of 2026-08-18. It is not, and no Run 07 artefact
+exists anywhere in this repository or in any analysis since: there is no §26,
+no `run07_*` log, and no `.done` marker. `run_sweep.sh` is still configured for
+it (`OUT=/workspace/run07`, `TEMPERATURE=0.7`), so the configuration landed and
+the sweep did not. Whether it was launched and died, or never launched, is not
+recorded here; `run_sweep.sh:77-80` notes that an attempt hit ENOSPC on the NFS
+export while the client still showed 99 GB free. **Treat Run 07 as not started
+and check `/workspace/run07/` on the DGX before assuming otherwise.**
+
+Do not read any figure in this file as a Run 07 result. Every number here is
+from runs 02–06, at temperature 0, and §24.1 explains why Run 07's absolute
+rates will not be comparable to them.
+
+**Middleware refactor, since 2026-11-22** (branch `kriti/middleware-wrapper`,
+not yet merged). Behaviour of both arms is unchanged throughout, held by a
+golden-file harness captured before any of it:
+
+- The pipeline is composed by `middleware/middleware_wrapper.py`. Both
+  harnesses call it; a test fails if either composes the stages itself.
+  Carries the component ablation switch.
+- `middleware/metrics_recorder.py` holds one definition of every metric and
+  refuses a disposition without its request, so the §1.1 fault cannot be
+  rewritten. Both reports count through it.
+- Reports now record model, temperature, seed, steps, commit and a dirty-tree
+  flag, which is §25 item 3.
+- Server failures are counted apart from parse failures, which is §6.2.
+- The paired report gained abstention and participation, which it never had.
+- A new harness-parity test found that the two harnesses wrote **different
+  order-rejection memories** for the same event; now shared. Same class as
+  §23.3, in a place that fix did not reach.
+- Dead files removed: `input_stabilizer.py`, `output_validator.py`,
+  `semantic_density_gating.py`. See `middleware/README.md`.
+- Test suite: **141 → 213 passing.**
 
 **If you are catching up, read section 23 first** — it carries the run-06
 results and the current next actions. It supersedes §22. Sections 19–21 explain
@@ -25,7 +59,7 @@ how we got here.
 | 17 | Run 04 and the `261ceec` partial fix. |
 | 18 | **The demo UI** — what it is, plus the rebuild (`010960f`). |
 | 19 | **Run 05 analysis — the >100% rate and the stale-context confound.** |
-| 20 | Fixes from run 05 (`264db38`, `4c6897e`). |
+| 20 | Fixes from run 05 (`99f36ff`, `4c6897e`). |
 | 21 | Run 06 — the multi-seed sweep, currently in flight. |
 | 22 | What to do next *(superseded by §23.5)*. |
 | 23 | **Run 06 analysis — the one surviving claim and three defects.** |
@@ -1126,7 +1160,7 @@ failure emits **two** log lines, so it is 114 failures × 5 calls ≈ **570**.
 Two commits. Test suite is now **127 tests**; `tests/test_run05_defects.py` is
 new and holds the regression coverage.
 
-### 20.1 `264db38` — denominator, feedback gate, arm symmetry, reflection parser
+### 20.1 `99f36ff` — denominator, feedback gate, arm symmetry, reflection parser
 
 **New predicate**, in `middleware/action_filtering.py`:
 
@@ -1308,7 +1342,7 @@ Read each config in this order:
 3. **`EXECUTED malformed`** — the headline. Middleware should be 0.
 4. **`caught before execution`** — proves the 0 above is not vacuous.
 5. **Distinct episodes vs raw** — divergence means an agent livelocked. The
-   `264db38` feedback-gate fix should have reduced this substantially versus run
+   `99f36ff` feedback-gate fix should have reduced this substantially versus run
    05; that is a specific, checkable prediction.
 6. **State contradictions** — the only detector that scores a HOLD.
 7. **Discordant pairs** in the paired reports — and check whether the conclusion
@@ -1513,7 +1547,7 @@ so this is not §19.2 repeating. But baseline stale hits still correlate with
 both context size and trade volume, and Alex swings 0% (s43) to 50% (s42)
 between seeds. Secondary evidence, not a headline.
 
-### 23.7 Livelock — the `264db38` feedback-gate fix worked
+### 23.7 Livelock — the `99f36ff` feedback-gate fix worked
 
 §22 item 5's specific checkable prediction, and it came out right. Raw
 hallucinations per distinct episode:
@@ -1689,19 +1723,28 @@ decides whether the sweep worked at all:
 
 Median and range across seeds, never a single seed's figure.
 
-### 3. Make runs self-identifying (carried forward from §22 item 2)
+### ~~3. Make runs self-identifying~~ — DONE (2026-11-23)
 
-`OLLAMA_CHAT_MODEL` should be an env var, and the model name **and now the
-temperature and seed** should be written into `hallucination_report.json`.
-Right now a report does not record what produced it. Run 06 vs run 07 will
-differ by sampling settings that appear nowhere in the artefacts, which is
-exactly the confusion this prevents. **Must land before any second model is
-swept.**
+`OLLAMA_CHAT_MODEL` is an env var, and both reports, independent and paired,
+now carry a `run_metadata` block: model read from the live configuration rather
+than assumed, temperature, seed, steps, config name, short commit and a
+dirty-tree flag, plus the Ollama version where obtainable. Anything
+undeterminable records `NOT FOUND` rather than a plausible default.
+
+The dirty flag is there because a result produced from an edited tree is not
+reproducible from that commit, and that is as important as the hash.
+
+The gate this was blocking is lifted: a second model may now be swept.
 
 ### Still open, lower priority
 
-- **6.2** — `"OLLAMA ERROR"` sentinel still conflates server failure with model
-  failure. Has not bitten a run yet; run 06 was clean.
+- ~~**6.2**~~ — DONE (2026-11-23). `_parse_json_response` classifies the
+  `"OLLAMA ERROR"` sentinel before attempting to parse it, so a server failure
+  is no longer recorded as "response was not valid JSON" and is counted under
+  its own total rather than as a parser fallback. It stays in the per-reason
+  breakdown, because dropping it would make a flaky-server run look clean. The
+  sentinel string itself is unchanged, so old logs parse as before, and run 06
+  saw zero of these, so its figures are unaffected.
 - **6.6 / 6.7** — the documented-but-absent noise filter, and the poignancy
   scale that contradicts its own comment.
 - **Persona consistency demonstrates nothing** (§19.4). Run 06 confirms it:

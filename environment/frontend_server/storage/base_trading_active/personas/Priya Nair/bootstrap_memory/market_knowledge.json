@@ -1,0 +1,20 @@
+{
+  "known_stocks": {
+    "AAPL": {
+      "sector": "consumer technology",
+      "last_known_price": 275.21,
+      "notes": [
+        "Stable; entry only on confirmation"
+      ]
+    },
+    "AMD": {
+      "sector": "semiconductors",
+      "last_known_price": 512.63,
+      "notes": [
+        "Volatile semiconductor name — keep small and short-term"
+      ]
+    }
+  },
+  "known_agents": [],
+  "market_context": "Skeptical stance. Confirmation before action; exit fast when wrong."
+}

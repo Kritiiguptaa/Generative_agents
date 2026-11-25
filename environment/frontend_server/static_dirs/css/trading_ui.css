@@ -1,429 +1,799 @@
-/*
-  Agent Anchor -- trading floor UI.
+/* ===========================================================================
+   Agent Anchor -- app chrome, shared by the trading floor and the run explorer.
 
-  Deliberately does NOT build on templates/base.html: that pulls Bootstrap 3
-  (2013, light theme, glyphicons) plus a third-party clustrmaps tracker, and
-  the map is a dark 16px-tile office. This is a self-contained dark terminal
-  theme instead -- no CDN CSS, no framework, no tracker.
-*/
+   Loaded AFTER anchor.css, which owns the tokens, buttons and the console
+   shell. This sheet adds the app-page furniture: topbar, market ticker,
+   transport, agent cards, decision log.
 
-:root {
-	--bg:          #0b0e14;
-	--panel:       #141922;
-	--panel-2:     #1b212c;
-	--line:        #262d3a;
-	--text:        #d6dbe5;
-	--text-dim:    #8791a5;
-	--text-faint:  #5b6577;
-	--accent:      #4d9fff;
-	--buy:         #2ecc8f;
-	--sell:        #ff5f6d;
-	--warn:        #f0b429;
-	--mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-	--sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
-}
+   Light ground, one amber accent. Nothing here writes a colour literal except
+   where a translucent tint is needed over white -- and those derive from the
+   palette's own green/red. If a value is not expressible in the tokens it
+   belongs in the token block, not in this file.
 
-* { box-sizing: border-box; }
+   Deliberately does NOT build on templates/base.html: that pulls Bootstrap 3
+   plus a third-party clustrmaps tracker.
+   =========================================================================== */
 
-body {
-	margin: 0;
-	background: var(--bg);
-	color: var(--text);
-	font-family: var(--sans);
-	font-size: 14px;
-	line-height: 1.5;
-	-webkit-font-smoothing: antialiased;
-}
+body { font-size: 14px; }
 
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
+/* --- topbar -------------------------------------------------------------- */
 
-/* ------------------------------------------------------------------ topbar */
-
+/* The app pages keep a compact topbar rather than the landing page's nav:
+   they are instruments, and the row carries live state (clock, status) that
+   has to stay visible while you scrub. */
 .topbar {
-	display: flex;
-	align-items: center;
-	gap: 16px;
-	padding: 12px 22px;
-	background: var(--panel);
-	border-bottom: 1px solid var(--line);
-	position: sticky;
-	top: 0;
-	z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 22px;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 40;
 }
 
-.brand {
-	font-weight: 700;
-	letter-spacing: 0.14em;
-	font-size: 13px;
-	text-transform: uppercase;
+.topbar .brand {
+  display: flex; align-items: center; gap: 9px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink);
 }
-.brand span { color: var(--accent); }
+.topbar .brand:hover { color: var(--ink); text-decoration: none; }
+.topbar .brand span,
+.topbar .brand b { color: var(--accent); }
+.topbar .brand .mark {
+  width: 24px; height: 24px; flex: none;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  background: linear-gradient(160deg, var(--shell-hi), var(--shell-lo));
+  border: 2px solid var(--shell-ink);
+  color: var(--shell-ink);
+  font-family: var(--font-pixel); font-size: 0.46rem;
+}
+
+.spacer { flex: 1; }
 
 .chip {
-	font-family: var(--mono);
-	font-size: 11px;
-	padding: 3px 9px;
-	border-radius: 999px;
-	background: var(--panel-2);
-	border: 1px solid var(--line);
-	color: var(--text-dim);
-	white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
 }
+a.chip:hover { border-color: var(--accent-line); color: var(--accent); background: var(--accent-soft); }
 
-.topbar .spacer { flex: 1; }
+/* Live indicator and the two value flags. All three app pages use them -- the
+   run report, the floor and the agent dossier -- so they belong in the shared
+   sheet rather than in whichever page happened to need them first. */
 
+.live-dot {
+  width: 8px; height: 8px; flex: none;
+  border-radius: 50%;
+  background: var(--sell);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.14);
+  animation: livePulse 1.6s ease-in-out infinite;
+}
+@keyframes livePulse { 50% { opacity: 0.3; } }
+
+/* A field the run never wrote down -- an absence, not a zero. */
+.v-missing { color: var(--sell) !important; font-weight: 400 !important; }
+/* A value that is real, but bad news. */
+.v-bad { color: var(--sell) !important; }
+
+/* The clock keeps the console's LCD face -- it is the one live readout in the
+   bar, and it should look like an instrument, not a label. */
 .clock {
-	font-family: var(--mono);
-	font-size: 13px;
-	color: var(--text);
+  font-family: var(--font-lcd);
+  font-size: 1.3rem;
+  line-height: 1;
+  color: var(--shell-ink);
+  background: var(--accent-fill);
+  border: 2px solid var(--shell-ink);
+  border-radius: var(--radius-sm);
+  padding: 3px 12px;
 }
 
-#live_badge { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; }
-#live_badge.live     { color: var(--sell); }
-#live_badge.finished { color: var(--text-faint); }
-
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-#live_badge.live .dot { animation: pulse 1.4s infinite; }
-
-/* ------------------------------------------------------------------ ticker */
+/* --- market ticker ------------------------------------------------------- */
 
 .ticker {
-	display: flex;
-	align-items: center;
-	gap: 20px;
-	padding: 9px 22px;
-	background: var(--panel-2);
-	border-bottom: 1px solid var(--line);
-	overflow-x: auto;
-	font-family: var(--mono);
-	font-size: 13px;
-	scrollbar-width: thin;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
 }
+.ticker::-webkit-scrollbar { display: none; }
+
 .ticker .label {
-	font-size: 10px;
-	letter-spacing: 0.12em;
-	color: var(--text-faint);
-	text-transform: uppercase;
-	flex: none;
+  flex: none;
+  display: flex; align-items: center;
+  padding: 0 16px;
+  background: var(--accent-fill);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
 }
-.tick { white-space: nowrap; flex: none; }
-.tick .sym  { color: var(--text-dim); margin-right: 6px; }
-.tick .px   { color: var(--text); font-variant-numeric: tabular-nums; }
-.tick.up   .px { color: var(--buy); }
-.tick.down .px { color: var(--sell); }
-.tick .delta { font-size: 11px; margin-left: 5px; }
-.tick.up   .delta { color: var(--buy); }
-.tick.down .delta { color: var(--sell); }
 
-/* ------------------------------------------------------------------ layout */
+.ticker .tick {
+  flex: none;
+  display: flex; align-items: baseline; gap: 7px;
+  padding: 10px 18px;
+  border-right: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+.ticker .tick .sym { color: var(--ink); font-weight: 600; }
+.ticker .tick .px { color: var(--muted); }
+.ticker .tick .up { color: var(--buy); }
+.ticker .tick .down { color: var(--sell); }
 
-.wrap {
-	display: grid;
-	grid-template-columns: minmax(0, 1fr) 340px;
-	gap: 18px;
-	padding: 18px 22px 60px;
-	max-width: 1680px;
-	margin: 0 auto;
-	align-items: start;
+/* --- floor page layout --------------------------------------------------- */
+
+.floor-wrap {
+  max-width: 1400px;
+  margin: 22px auto 64px;
+  padding: 0 22px;
 }
-@media (max-width: 1100px) {
-	.wrap { grid-template-columns: minmax(0, 1fr); }
+
+/* The console is sized to the floor it shows, not to the page. Stretched to the
+   full 1400px wrap the 44x32 office renders larger than it reads at -- the
+   previous layout gave the map about 1040px and that was the right size. The
+   transport and the interaction banner track the same width so the console and
+   its controls read as one instrument. */
+.floor-stage,
+.floor-wrap > .dex-map,
+.floor-wrap > .transport,
+.floor-wrap > #interaction_banner {
+  max-width: 1080px;
+  margin-left: auto;
+  margin-right: auto;
 }
+
+.floor-cols {
+  display: grid;
+  grid-template-columns: 1.55fr 1fr;
+  gap: 16px;
+  margin-top: 18px;
+  align-items: start;
+}
+.floor-sticky { position: sticky; top: 74px; }
 
 .panel {
-	background: var(--panel);
-	border: 1px solid var(--line);
-	border-radius: 10px;
-	overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
 }
 
 .panel-head {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	padding: 10px 14px;
-	border-bottom: 1px solid var(--line);
-	font-size: 11px;
-	letter-spacing: 0.12em;
-	text-transform: uppercase;
-	color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-display);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
-.panel-head .spacer { flex: 1; }
-.panel-body { padding: 14px; }
 
-/* --------------------------------------------------------------- map stage */
+.panel-body { padding: 16px; }
 
-/* The canvas renders the whole 44x32 office at 2x (1408x1024) for crisp pixel
-   art, then scales down to whatever width the column gives it. Nearest-
-   neighbour keeps it from going blurry at fractional scales. */
-#game-container { line-height: 0; background: #3c3f4a; }
+.notice {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 13px 16px;
+  margin-top: 18px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+.notice code { color: var(--accent); }
+
+/* --- the floor, in the ANCHOR-1 shell ------------------------------------ */
+
+#game-container { line-height: 0; background: var(--screen); }
 #game-container canvas {
-	width: 100% !important;
-	height: auto !important;
-	display: block;
-	image-rendering: pixelated;
-	image-rendering: crisp-edges;
+  width: 100% !important;
+  height: auto !important;
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
 
-/* -------------------------------------------------------------- transport */
+.zoom-controls { display: flex; align-items: center; gap: 6px; }
+
+/* --- transport ----------------------------------------------------------- */
 
 .transport {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	padding: 12px 14px;
-	border-top: 1px solid var(--line);
-	background: var(--panel-2);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
+.transport .btn { padding: 7px 13px; font-size: 0.82rem; }
+.transport .btn:not(.primary) {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--muted);
+}
+.transport .btn:not(.primary):hover { border-color: var(--faint); color: var(--ink); }
 
-.btn {
-	background: var(--panel);
-	border: 1px solid var(--line);
-	color: var(--text);
-	border-radius: 6px;
-	padding: 6px 11px;
-	font-size: 13px;
-	font-family: var(--mono);
-	cursor: pointer;
-	line-height: 1;
-	transition: border-color 0.12s, color 0.12s;
+.transport input[type="range"] {
+  flex: 1; min-width: 0; height: 5px;
+  -webkit-appearance: none; appearance: none;
+  background: var(--border-strong);
+  border-radius: 999px;
+  outline: none;
 }
-.btn:hover  { border-color: var(--accent); color: #fff; }
-.btn:active { transform: translateY(1px); }
-.btn.primary { border-color: var(--accent); color: var(--accent); min-width: 74px; }
-.btn:disabled {
-	opacity: 0.35;
-	cursor: default;
+.transport input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent-fill);
+  border: 2px solid var(--shell-ink);
+  cursor: pointer;
 }
-/* Keep the end-stop buttons from lighting up as if they still did something. */
-.btn:disabled:hover { border-color: var(--line); color: var(--text); }
-
-/* Zoom stepper in the map panel header. The readout between the buttons is a
-   live value, not the static label it replaced. */
-.zoom-controls {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	margin-right: 10px;
-}
-.zoom-controls .zoom-btn {
-	padding: 2px 8px;
-	font-size: 14px;
-	min-width: 26px;
-}
-.zoom-controls .chip {
-	min-width: 42px;
-	text-align: center;
+.transport input[type="range"]::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent-fill);
+  border: 2px solid var(--shell-ink);
+  cursor: pointer;
 }
 
 .step-readout {
-	font-family: var(--mono);
-	font-size: 12px;
-	color: var(--text-dim);
-	white-space: nowrap;
-	font-variant-numeric: tabular-nums;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--faint);
+  white-space: nowrap;
 }
-.step-readout b { color: var(--text); }
+.step-readout b { color: var(--ink); }
 
-input[type=range] {
-	flex: 1;
-	-webkit-appearance: none;
-	appearance: none;
-	height: 4px;
-	border-radius: 2px;
-	background: var(--line);
-	outline: none;
-	min-width: 80px;
-}
-input[type=range]::-webkit-slider-thumb {
-	-webkit-appearance: none;
-	width: 14px; height: 14px;
-	border-radius: 50%;
-	background: var(--accent);
-	cursor: pointer;
-	border: 2px solid var(--panel);
-}
-input[type=range]::-moz-range-thumb {
-	width: 14px; height: 14px;
-	border-radius: 50%;
-	background: var(--accent);
-	cursor: pointer;
-	border: 2px solid var(--panel);
+#interaction_banner:not(:empty) {
+  margin-top: 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--muted);
+  font-size: 0.86rem;
 }
 
-/* ---------------------------------------------------------------- notices */
-
-.notice {
-	margin: 0 0 14px;
-	padding: 11px 14px;
-	border-radius: 8px;
-	border-left: 3px solid var(--warn);
-	background: rgba(240, 180, 41, 0.08);
-	color: var(--text-dim);
-	font-size: 13px;
-}
-.notice code { font-family: var(--mono); color: var(--text); }
-
-#interaction_banner {
-	display: none;
-	margin: 0;
-	padding: 12px 14px;
-	border-top: 1px solid var(--line);
-	border-left: 3px solid var(--accent);
-	background: rgba(77, 159, 255, 0.07);
-	font-size: 13px;
-}
-#interaction_banner .who   { font-weight: 600; color: var(--accent); }
-#interaction_banner .topic { color: var(--text-dim); font-style: italic; }
-#interaction_banner .follow { color: var(--text-faint); font-size: 12px; display: block; margin-top: 5px; }
-
-/* ------------------------------------------------------------ agent cards */
-
-.agents { display: flex; flex-direction: column; gap: 12px; }
-
-.agent-card {
-	background: var(--panel);
-	border: 1px solid var(--line);
-	border-left: 3px solid var(--line);
-	border-radius: 10px;
-	padding: 12px 14px;
-	cursor: pointer;
-	transition: border-color 0.14s, background 0.14s;
-}
-.agent-card:hover    { background: var(--panel-2); }
-.agent-card.selected { border-color: var(--accent); border-left-color: var(--accent); }
-
-.agent-top { display: flex; align-items: center; gap: 10px; }
-.agent-top img {
-	width: 38px; height: 38px;
-	border-radius: 8px;
-	background: var(--panel-2);
-	image-rendering: pixelated;
-	flex: none;
-}
-.agent-id { flex: 1; min-width: 0; }
-.agent-name { font-weight: 600; font-size: 14px; }
-.agent-role {
-	font-size: 11px;
-	color: var(--text-faint);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.agent-emoji { font-size: 20px; flex: none; }
-
-.agent-action {
-	margin-top: 10px;
-	font-family: var(--mono);
-	font-size: 15px;
-	letter-spacing: 0.02em;
-}
-.agent-action.buy  { color: var(--buy); }
-.agent-action.sell { color: var(--sell); }
-.agent-action.hold { color: var(--text-dim); }
-
-.agent-figures {
-	display: flex;
-	gap: 14px;
-	margin-top: 8px;
-	font-family: var(--mono);
-	font-size: 12px;
-	color: var(--text-dim);
-	font-variant-numeric: tabular-nums;
-}
-.agent-figures b { color: var(--text); font-weight: 500; }
-
-/* ---------------------------------------------------------------- badges */
+/* --- badges -------------------------------------------------------------- */
 
 .badge {
-	display: inline-block;
-	font-family: var(--mono);
-	font-size: 10px;
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-	padding: 2px 7px;
-	border-radius: 4px;
-	border: 1px solid;
-	white-space: nowrap;
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--faint);
+  background: var(--surface-2);
 }
-.badge.success  { color: var(--buy);   border-color: rgba(46, 204, 143, 0.4); background: rgba(46, 204, 143, 0.1); }
-.badge.retry    { color: var(--warn);  border-color: rgba(240, 180, 41, 0.4); background: rgba(240, 180, 41, 0.1); }
-.badge.fallback,
-.badge.hallucination { color: var(--sell); border-color: rgba(255, 95, 109, 0.4); background: rgba(255, 95, 109, 0.1); }
-.badge.unknown  { color: var(--text-faint); border-color: var(--line); background: var(--panel-2); }
+.badge.success { color: var(--buy);    border-color: rgba(22, 163, 74, 0.35);  background: rgba(22, 163, 74, 0.09); }
+.badge.retry   { color: #9A6A05;       border-color: var(--accent-line);       background: var(--accent-soft); }
+.badge.blocked,
+.badge.error   { color: var(--sell);   border-color: rgba(220, 38, 38, 0.32);  background: rgba(220, 38, 38, 0.08); }
+.badge.unknown { color: var(--faint); }
 
-/* ---------------------------------------------------------------- detail */
+/* --- agent row ----------------------------------------------------------- */
 
-.detail-empty { color: var(--text-faint); font-style: italic; font-size: 13px; }
+/* Three across under the floor. These were a 320px rail before, which made
+   the agents -- the subject of the page -- its narrowest element. */
+.agents {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
 
-.detail-row { margin-bottom: 12px; }
-.detail-row:last-child { margin-bottom: 0; }
+.agent-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+.agent-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-soft); }
+.agent-card.selected {
+  border-color: var(--accent);
+  box-shadow: var(--glow);
+}
+
+.agent-top { display: flex; align-items: center; gap: 12px; }
+.agent-top img {
+  width: 42px; height: 42px;
+  border-radius: 9px;
+  border: 2px solid var(--shell-ink);
+  background: var(--surface-2);
+  image-rendering: pixelated;
+}
+.agent-id { min-width: 0; flex: 1; }
+.agent-name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.98rem;
+  color: var(--ink);
+}
+.agent-role {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--faint);
+  text-transform: capitalize;
+}
+.agent-emoji { font-size: 1.2rem; flex: none; }
+
+.agent-action {
+  margin-top: 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.agent-action.buy  { color: #0F7A38; border-color: rgba(22, 163, 74, 0.35);  background: rgba(22, 163, 74, 0.10); }
+.agent-action.sell { color: #B01B1B; border-color: rgba(220, 38, 38, 0.32);  background: rgba(220, 38, 38, 0.08); }
+.agent-action.hold { color: var(--faint); }
+
+.agent-badge-row:not(:empty) { margin-top: 8px; }
+
+.agent-figures {
+  display: flex; gap: 18px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.agent-figures div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.agent-figures span {
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.agent-figures b {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink);
+  font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* --- agent detail -------------------------------------------------------- */
+
+.detail-empty { color: var(--faint); font-style: italic; font-size: 0.86rem; }
+.detail-empty code { font-style: normal; color: var(--muted); }
+
+.detail-row { display: flex; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.detail-row:last-child { border-bottom: 0; }
 .detail-label {
-	font-size: 10px;
-	letter-spacing: 0.12em;
-	text-transform: uppercase;
-	color: var(--text-faint);
-	margin-bottom: 4px;
+  flex: none; width: 112px;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding-top: 2px;
 }
 .detail-reasoning {
-	background: var(--panel-2);
-	border: 1px solid var(--line);
-	border-radius: 6px;
-	padding: 10px 12px;
-	font-size: 13px;
-	color: var(--text-dim);
-	max-height: 190px;
-	overflow-y: auto;
-	white-space: pre-wrap;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.6;
+  white-space: pre-line;
 }
 
-.kv {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-	gap: 10px;
-}
-.kv > div {
-	background: var(--panel-2);
-	border: 1px solid var(--line);
-	border-radius: 6px;
-	padding: 8px 10px;
-}
-.kv .k { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-faint); }
-.kv .v { font-family: var(--mono); font-size: 15px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.kv { font-family: var(--font-mono); font-size: 0.8rem; }
 
-/* ------------------------------------------------------------ decision log */
+/* --- decision log -------------------------------------------------------- */
 
-.log-scroll { max-height: 300px; overflow-y: auto; }
-table.log { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+.log-scroll { max-height: 520px; overflow: auto; }
+
+table.log { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
 table.log th {
-	position: sticky; top: 0;
-	background: var(--panel-2);
-	text-align: left;
-	font-weight: 500;
-	font-size: 10px;
-	letter-spacing: 0.1em;
-	text-transform: uppercase;
-	color: var(--text-faint);
-	padding: 7px 10px;
-	border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 1;
+  text-align: left;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--faint);
 }
-table.log td { padding: 6px 10px; border-bottom: 1px solid var(--line); color: var(--text-dim); }
-table.log tr:hover td { background: var(--panel-2); color: var(--text); }
-table.log tr.current td { background: rgba(77, 159, 255, 0.09); }
-table.log tr { cursor: pointer; }
-table.log td.act.buy  { color: var(--buy); }
-table.log td.act.sell { color: var(--sell); }
-table.log td.num { text-align: right; font-variant-numeric: tabular-nums; }
-table.log td.why {
-	max-width: 320px;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	color: var(--text-faint);
+table.log td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  vertical-align: top;
+}
+table.log tbody tr { cursor: pointer; }
+table.log tbody tr:hover { background: var(--surface-2); }
+table.log .num { text-align: right; font-family: var(--font-mono); }
+table.log code { color: var(--accent); }
+
+/* --- responsive ---------------------------------------------------------- */
+
+@media (max-width: 1080px) {
+  .floor-cols { grid-template-columns: minmax(0, 1fr); }
+  .floor-sticky { position: static; }
 }
 
-::-webkit-scrollbar { width: 9px; height: 9px; }
-::-webkit-scrollbar-track { background: var(--panel); }
-::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; gap: 8px; padding: 10px 14px; }
+  .floor-wrap { padding: 0 14px; }
+  .transport { flex-wrap: wrap; }
+}
+
+
+/* ===========================================================================
+   AGENT DOSSIER  (/trading_persona_state/)
+   ---------------------------------------------------------------------------
+   The page you land on from an agent card. Two kinds of fact live here and
+   they must not look alike:
+
+     - the persona, from scratch.json, written before the run and never
+       touched by it. An INPUT to the model.
+     - the decision, from trading_log.json, one step of what the model then
+       actually did. An OBSERVATION.
+
+   So they are two cards, side by side, each labelled with its source file.
+   The old page put both in one grey table and the distinction vanished.
+   =========================================================================== */
+
+.ps-wrap {
+  max-width: 1080px;
+  margin: 22px auto 72px;
+  padding: 0 22px;
+}
+
+/* --- 1. the nameplate ---------------------------------------------------- */
+
+.ps-plate {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+  padding: 22px 24px;
+  position: relative;
+  overflow: hidden;
+}
+/* The amber rule down the left edge is the dossier only decoration. It is the
+   same mark the run report uses on its letterhead. */
+.ps-plate::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--accent);
+}
+
+.ps-portrait {
+  width: 68px; height: 68px;
+  flex: none;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  object-fit: cover;
+  image-rendering: pixelated;
+}
+
+.ps-plate-id { min-width: 0; flex: 1; }
+
+.ps-doc {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+.ps-plate-id h1 {
+  font-size: 1.75rem;
+  letter-spacing: -0.02em;
+}
+
+.ps-plate-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.ps-tag {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.ps-tag.accent {
+  color: #9A6A05;
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+
+/* Run totals, set as a form the way the run report sets its letterhead. */
+.ps-form { display: flex; gap: 26px; margin: 0; flex: none; }
+.ps-form div { display: flex; flex-direction: column; gap: 2px; }
+.ps-form dt {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.ps-form dd {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1;
+}
+
+/* --- the peer switcher --------------------------------------------------- */
+
+.ps-peers {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 2px 0;
+}
+.ps-peers > span {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-right: 2px;
+}
+.ps-peer {
+  font-size: 0.82rem;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+.ps-peer:hover { color: var(--ink); border-color: var(--border-strong); }
+.ps-peer.current {
+  color: var(--accent-ink);
+  background: var(--accent-fill);
+  border-color: transparent;
+  font-weight: 600;
+}
+
+/* --- 2/3. the two cards -------------------------------------------------- */
+
+.ps-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 18px;
+  margin-top: 18px;
+  align-items: start;
+}
+
+.ps-note {
+  font-size: 0.8rem;
+  color: var(--faint);
+  line-height: 1.55;
+  margin-bottom: 14px;
+}
+.ps-note code { color: var(--muted); }
+
+.ps-field { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.ps-field:last-child { border-bottom: 0; padding-bottom: 0; }
+.ps-field-k {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+.ps-field-v { font-size: 0.9rem; color: var(--ink); line-height: 1.6; }
+
+/* Reasoning is the model own words, so it is set as a quotation rather than as
+   another field value -- it is evidence, not metadata. */
+.ps-quote {
+  border-left: 2px solid var(--accent-line);
+  background: var(--accent-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 9px 13px;
+  font-style: italic;
+  color: var(--muted);
+}
+
+.ps-hint { color: var(--faint); font-size: 0.78rem; }
+
+.ps-sym {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  margin: 0 5px 5px 0;
+}
+
+/* The stamp. Deliberately the same rubber-stamp language as the console
+   blocked ticket and the run report verdict -- one visual idea, three places,
+   so a viewer only has to learn it once. */
+.ps-stamp {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1.5px solid;
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.ps-stamp b {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  letter-spacing: 0.1em;
+}
+.ps-stamp i { font-style: normal; font-size: 0.82rem; color: var(--muted); }
+
+.ps-stamp.blocked  { color: var(--sell);  border-color: rgba(220, 38, 38, 0.40); background: rgba(220, 38, 38, 0.06); }
+.ps-stamp.clean    { color: #0F7A38;      border-color: rgba(22, 163, 74, 0.40); background: rgba(22, 163, 74, 0.07); }
+.ps-stamp.retry,
+.ps-stamp.fallback { color: #9A6A05;      border-color: var(--accent-line);      background: var(--accent-soft); }
+.ps-stamp.unknown  { color: var(--faint); border-color: var(--border);           background: var(--surface-2); }
+
+/* Carried-forward frame: the shown decision is not from the step in the URL.
+   Saying so is load-bearing -- silently showing a stale frame would misreport
+   the run. */
+.ps-carry {
+  font-size: 0.8rem;
+  color: #9A6A05;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  padding: 9px 13px;
+  margin-bottom: 14px;
+}
+
+.ps-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.ps-emoji { font-size: 1.4rem; flex: none; line-height: 1; }
+.ps-action b { display: block; font-size: 0.95rem; color: var(--ink); }
+.ps-action span { display: block; font-size: 0.82rem; color: var(--muted); margin-top: 2px; }
+
+.ps-why {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--sell);
+  margin-top: 9px;
+  padding-left: 2px;
+}
+
+/* --- 4. requested vs permitted ------------------------------------------- */
+
+/* The whole thesis of the project in one row: what the model asked for on the
+   left, what the filter let through on the right. */
+.ps-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+  margin-top: 14px;
+}
+.ps-split-half {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 13px;
+  background: var(--surface-2);
+  min-width: 0;
+}
+.ps-split-half span {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 4px;
+}
+.ps-split-half b {
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  color: var(--ink);
+  word-break: break-word;
+}
+.ps-split-half.denied {
+  border-color: rgba(220, 38, 38, 0.32);
+  background: rgba(220, 38, 38, 0.05);
+}
+.ps-split-half.denied b { color: var(--sell); }
+.ps-split-half.ok {
+  border-color: rgba(22, 163, 74, 0.32);
+  background: rgba(22, 163, 74, 0.05);
+}
+.ps-split-arrow {
+  align-self: center;
+  color: var(--faint);
+  font-size: 1.1rem;
+}
+
+.ps-kind { font-size: 0.8rem; color: var(--muted); margin-top: 9px; }
+.ps-kind code { color: var(--accent); }
+
+/* --- 5. the ledger ------------------------------------------------------- */
+
+.ps-book { display: flex; align-items: center; gap: 32px; flex-wrap: wrap; }
+.ps-book-figs { display: flex; gap: 32px; flex: none; }
+.ps-book-figs div { display: flex; flex-direction: column; gap: 3px; }
+.ps-book-figs span {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.ps-book-figs b {
+  font-family: var(--font-display);
+  font-size: 1.45rem;
+  color: var(--ink);
+  line-height: 1;
+}
+.ps-positions { min-width: 0; flex: 1; }
+.ps-pos-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.ps-pos {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 9px;
+}
+.ps-pos b { color: var(--ink); font-weight: 600; }
+
+@media (max-width: 900px) {
+  .ps-cols { grid-template-columns: minmax(0, 1fr); }
+  .ps-plate { flex-wrap: wrap; }
+  .ps-form { width: 100%; }
+  .ps-split { grid-template-columns: minmax(0, 1fr); }
+  .ps-split-arrow { transform: rotate(90deg); justify-self: center; }
+}

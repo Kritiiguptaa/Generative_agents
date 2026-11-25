@@ -23,54 +23,55 @@ ACTION_ICONS = {
 }
 
 # ---------------------------------------------------------------------------
-# Office map geometry (static_dirs/assets/office/visuals/office.json, 44x32
-# tiles @16px). Every tile below was read out of the map's own authoring
-# matrices, not eyeballed -- see office-main/matrix/: game_object_maze.csv
-# labels desks as 32140 and the presentation screen as 32147,
-# arena_maze.csv marks the "open office bullpen" (32131) at x:16-42 y:2-15,
-# and collision_maze.csv is the walkability ground truth.
+# Office map geometry (static_dirs/assets/office/visuals/munder_office.json,
+# vendored from Munder Difflin -- see ATTRIBUTION.md in that directory -- 34x22
+# tiles @16px). Every tile below was read out of the map's own spawn-points /
+# zones object layers and its collision layer (see office.tmj), not eyeballed.
 #
-# The bullpen has three identical desk clusters (x:17-19, x:22-24, x:27-29,
-# desks on rows y=6/7 with computers above on y=5) -- one per trading agent.
+# This replaces the project's original 44x32 office.json geometry (the old
+# comments/constants are preserved in git history). Swapping the map is a
+# presentation-layer change -- it does not touch how trading_reverie.py or
+# action_filtering.py decide what an agent does, only where that decision
+# renders on screen.
 # ---------------------------------------------------------------------------
 
-# Where agents sit -- the chair itself (gid 941 on y=8), with the desk directly
-# above on y=6/7 and the monitor on y=5.
-#
-# These tiles are SOLID in the Collisions layer, which is correct: you cannot
-# walk through an occupied chair. The frontend's pathfinder special-cases a
-# blocked destination so an agent can take one final step into their own seat
-# (see find_path in main_script.html). Earlier these were x=17/22/27 -- the
-# walkable aisle tile beside the cluster -- which rendered every agent standing
-# a tile clear of their desk, as if permanently about to sit down.
+# The map's own spawn-points layer names six desks "pc-1".."pc-6" in a row at
+# y=13 (tile), three tiles apart, and a second row of six workstations on y=18
+# at the same x. One per trading agent, in persona order: the first six agents
+# take pc-1..pc-6, the next three take the first three desks on the y=18 row.
+# The ambient staff that used to sit at pc-4/5/6 were moved to the rest of the
+# y=18 row (see NPC_ROUTES in trading_map/main_script.html).
 DESK_TILES = {
-    "Alex Chen": [18, 8],
-    "Marcus Webb": [23, 8],
-    "Sara Kim": [28, 8],
+    "Alex Chen": [2, 13],
+    "Marcus Webb": [6, 13],
+    "Sara Kim": [10, 13],
+    "Margaret Okafor": [14, 13],
+    "Daniel Reyes": [18, 13],
+    "Priya Nair": [22, 13],
+    "Tomas Herrera": [2, 18],
+    "Jade Whitfield": [6, 18],
+    "Kofi Mensah": [10, 18],
 }
 
-# The two presentation screens (game object 32147) span x:20-21 and x:24-25 on
-# rows y=2-3. Row y=4 beneath them is open floor, and x=22 sits centred
-# between the two screens -- that's the "check the market board" spot agents
-# walk to on a real BUY/SELL.
-MARKET_BOARD_TILE = [22, 4]
+# The map's "boardroom" zone (tiles x:9-17, y:3-7) is the meeting-room-with-a-
+# screen equivalent of the old map's presentation screens -- this tile sits
+# inside it on open floor (collision-verified), the "check the market board"
+# spot agents walk to on a real BUY/SELL.
+MARKET_BOARD_TILE = [13, 7]
 
-# Walkable extent of the market-board row inside the bullpen (collision_maze
-# shows y=4 clear from x=16 to x=42). Several agents commonly BUY on the same
-# step, so they're spread along this row instead of all stacking on one tile.
-MARKET_BOARD_SPAN = (16, 42)
+# Walkable extent of the boardroom's open floor row (collision layer: y=7 is
+# clear from x=9 to x=17). Several agents commonly BUY on the same step, so
+# they're spread along this row instead of all stacking on one tile.
+MARKET_BOARD_SPAN = (9, 17)
 
-# Fully-walkable aisle running the width of the bullpen (collision_maze.csv
-# shows y=9 clear for 38 tiles from x=5). Fallback meeting spot, used only when
-# an agent has no known desk position.
-MEETING_ROW = 9
+# The "pc" desk row (y=13) runs walkable from x=1 to x=24 (collision-verified).
+# Fallback meeting spot, used only when an agent has no known desk position.
+MEETING_ROW = 13
 
-# The lounge on the lower floor. Row 16 walls the bullpen off from everything
-# below it, with doorways at x=7-8 and x=32-33; the pathfinder routes through
-# them, so this is reachable from all three desks (BFS-verified: 23 tiles from
-# Alex's desk, 28 from Marcus's, 33 from Sara's). Agents meet here rather than
-# in the aisle one tile below their own desks, which read as "barely moved".
-MEETING_ROOM_TILE = [7, 21]
+# The map's "warroom-seat" spawn point -- a walkable tile just past the
+# boardroom zone, reachable from every desk via the open floor. Agents meet
+# here rather than at their own desks, which read as "barely moved".
+MEETING_ROOM_TILE = [23, 7]
 
 # trading_interactions.maybe_interaction() records a meeting on a single step,
 # but a conversation that appears and vanishes inside one 1600 ms replay tick is
@@ -83,17 +84,25 @@ MEETING_ROOM_TILE = [7, 21]
 # there was a no-op. Anyone who traded leaves for the market board as normal.
 MEETING_HOLD_STEPS = 3
 
-# Break area: the bank of vending machines in the lower-right room. The office
-# map already draws real appliances across x=26..32 on y=19 (solid in the
-# Collisions layer), and y=20 directly in front of them is clear -- so an agent
-# sent here stands AT a machine rather than on an anonymous patch of floor.
-# That matters because the previous spot was open floor and the only cue that
-# anything was happening was a 6px cup glyph over a 16px sprite.
+# Break area: the map's own cafeteria zone (tiles x:24-31, y:12-19), with a
+# "cafe-stand-coffee" spawn point at exactly this tile -- walkable and open in
+# the collision layer, right in front of the coffee machine.
 #
-# BREAK_STRIDE spaces the agents two tiles apart so each one lines up with its
-# own machine (26, 28, 30) instead of crowding a single one.
+# One standing tile per agent, spread over the cafeteria (rows y=12, 14, 16),
+# every one walkable and reachable in the collision layer (checked with a
+# flood fill from the coffee tile). This used to be BREAK_ROOM_TILE plus a
+# two-tile stride, which was enough for three agents: from the fourth on, the
+# x coordinate ran past the walls at x>=31 and past the 34-tile map, so those
+# agents had no valid break tile and the rest bunched along one row. The
+# bottom row (y=20) is not used: it sits against the map's lower edge, where
+# a nameplate under the sprite is clipped by the frame.
+BREAK_TILES = [
+    [25, 12], [27, 12], [29, 12],
+    [25, 14], [27, 14], [29, 14],
+    [25, 16], [28, 16], [31, 16],
+]
+# The "BREAK AREA" label is drawn at the coffee machine; this is only its anchor.
 BREAK_ROOM_TILE = [26, 20]
-BREAK_STRIDE = 2
 
 # An agent that holds this many steps running is sent to the break area instead
 # of sitting motionless at their desk.
@@ -255,7 +264,6 @@ def _apply_hold_streaks(movement, persona_names, map_width=44):
     and every metric attached to it are left exactly as logged, so the agent
     cards and decision log still report the HOLD that actually happened.
     """
-    bx, by = BREAK_ROOM_TILE
     for offset, agent in enumerate(sorted(persona_names)):
         streak = 0
         for step in sorted(movement.keys()):
@@ -267,8 +275,8 @@ def _apply_hold_streaks(movement, persona_names, map_width=44):
                 continue
             streak += 1
             if streak >= HOLD_STREAK_FOR_BREAK:
-                # One machine each, rather than three people on one tile.
-                rec["movement"] = [min(bx + offset * BREAK_STRIDE, map_width - 1), by]
+                # One tile each, rather than everyone on one tile.
+                rec["movement"] = list(BREAK_TILES[offset % len(BREAK_TILES)])
                 rec["pronunciatio"] = "☕"        # hot beverage
                 rec["on_break"] = True
                 rec["hold_streak"] = streak

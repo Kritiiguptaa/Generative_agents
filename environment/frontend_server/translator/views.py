@@ -75,6 +75,93 @@ def _split_associative_memory(associative):
 
   return a_mem_event, a_mem_chat, a_mem_thought
 
+# ---------------------------------------------------------------------------
+# landing-page console
+# ---------------------------------------------------------------------------
+
+def _console_payload(sim_code, meta, log):
+  """
+  Per-sim data for the handheld console on the landing page: where each agent
+  sits on the office floor, and the one-line summary its ID card shows.
+
+  Kept deliberately thin. The console is a preview, not a second run explorer,
+  so it carries counts and the last action -- never a claim about what the
+  middleware stopped, which only /run/ is allowed to make.
+  """
+  names = meta.get("persona_names", [])
+  desks = sim_data.load_desk_positions(sim_code, names)
+
+  # One pass over the log instead of one per agent; these runs reach a few
+  # thousand records and the index renders every sim.
+  last, trades, holds, flagged = {}, {}, {}, {}
+  for entry in log:
+    agent = entry.get("agent")
+    if agent is None:
+      continue
+    decision = entry.get("decision") or {}
+    action = (decision.get("action") or "hold").lower()
+    if action in ("buy", "sell"):
+      trades[agent] = trades.get(agent, 0) + 1
+    else:
+      holds[agent] = holds.get(agent, 0) + 1
+    if entry.get("hallucination"):
+      flagged[agent] = flagged.get(agent, 0) + 1
+    last[agent] = sim_data._action_description(decision)
+
+  agents = []
+  for name in names:
+    snippet = sim_data.load_persona_snippet(sim_code, name)
+    tile = desks.get(name) or [0, 0]
+    agents += [{
+      "name": name,
+      # trader_type is the closest thing the persona files carry to a job
+      # title; runs forked before it existed fall back to a neutral label.
+      # trader_type is stored as a slug ("hedge_fund"); the card shows it as a
+      # title, so it is un-slugged here rather than in three template filters.
+      "role": (snippet.get("trader_type") or "trading agent").replace("_", " "),
+      "risk": snippet.get("risk_tolerance") or "",
+      "watchlist": (snippet.get("watchlist") or [])[:4],
+      "x": tile[0], "y": tile[1],
+      "trades": trades.get(name, 0),
+      "holds": holds.get(name, 0),
+      "flagged": flagged.get(name, 0),
+      "last": last.get(name, ""),
+    }]
+
+  # The console replays the run rather than looping a canned animation: one
+  # entry per logged decision, in order, so the tickets flying to the market
+  # board are the orders these agents actually placed and the ones that get
+  # stamped BLOCKED are the ones the filter actually stopped.
+  index = {name: i for i, name in enumerate(names)}
+  timeline = []
+  for entry in log:
+    agent = entry.get("agent")
+    if agent not in index:
+      continue
+    decision = entry.get("decision") or {}
+    action = (decision.get("action") or "hold").lower()
+    requested = entry.get("requested") or {}
+    timeline += [{
+      "step": entry.get("step", 0),
+      "a": index[agent],
+      "action": action,
+      "symbol": decision.get("symbol") or requested.get("symbol") or "",
+      "qty": decision.get("quantity") or requested.get("quantity") or 0,
+      # What the model asked for, when that differs from what ran -- this is
+      # the pair the whole project exists to show side by side.
+      "req": (requested.get("action") or "").lower(),
+      "halluc": bool(entry.get("hallucination")),
+      "kind": entry.get("halluc_kind") or "",
+    }]
+
+  return {
+    "agents": agents,
+    "flagged": sum(flagged.values()),
+    "timeline": timeline,
+    "steps": (timeline[-1]["step"] + 1) if timeline else 0,
+  }
+
+
 def landing(request):
   """
   Index of every sim in storage/ that actually has trading data, so the map
@@ -101,9 +188,31 @@ def landing(request):
         "is_running": status["is_running"],
         "is_trading": bool(log) or bool(
           set(meta.get("persona_names", [])) & set(sim_data.DESK_TILES)),
+        # Everything the console on the landing page draws and reads out. It is
+        # built here rather than fetched per-click because the whole index is a
+        # handful of small JSON files -- one pass at render time is cheaper than
+        # a poll endpoint, and it keeps the console honest: it can only show
+        # what the run actually recorded.
+        "console": _console_payload(name, meta, log),
       }]
   sims.sort(key=lambda s: (not s["is_trading"], -s["decisions"], s["sim_code"]))
-  context = {"sims": sims}
+  # The index also picks up Smallville village sims and half-created folders.
+  # They are real storage, so they stay listed -- but as a quiet name-only
+  # strip, not as full cards competing with the runs worth opening.
+  runs  = [s for s in sims if s["is_trading"] and s["decisions"]]
+  other = [s for s in sims if s not in runs]
+
+  context = {
+    "sims": sims,
+    "runs": runs,
+    "other": other,
+    # The console is driven client-side (canvas floor + ID card), so the same
+    # index the table renders is handed to JS as one blob rather than being
+    # re-fetched.
+    "sims_json": json.dumps(runs),
+    "total_decisions": sum(s["decisions"] for s in runs),
+    "total_flagged": sum(s["console"]["flagged"] for s in runs),
+  }
   template = "landing/landing.html"
   return render(request, template, context)
 
@@ -430,6 +539,14 @@ def run_explorer(request, sim_code):
     "Alex Chen":   "over-caution -- waits for confirmation indefinitely",
     "Marcus Webb": "over-sizing beyond available cash",
     "Sara Kim":    "acting on stale headlines",
+    # The six added with the 9-agent roster. Design intent written with the
+    # personas (conservative / moderate / aggressive), not a measured result.
+    "Margaret Okafor": "never acting -- holds cash through every setup",
+    "Daniel Reyes":    "over-staging -- splits entries until none executes",
+    "Priya Nair":      "paralysis by skepticism -- waits for confirmation that never comes",
+    "Tomas Herrera":   "drifting off his own target weights",
+    "Jade Whitfield":  "over-concentration in one or two names",
+    "Kofi Mensah":     "over-trading and sizing beyond available cash",
   }
   agents = []
   for name in persona_names:
@@ -440,9 +557,14 @@ def run_explorer(request, sim_code):
     for d in own:
       run_len = 0 if d["action"] in ("buy", "sell") else run_len + 1
       longest = max(longest, run_len)
+    snippet = sim_data.load_persona_snippet(sim_code, name)
     agents.append({
       "name": name,
-      "snippet": sim_data.load_persona_snippet(sim_code, name),
+      "snippet": snippet,
+      # trader_type is a slug in the persona files ("hedge_fund"). The card
+      # prints it as a title, and Django has no replace filter, so it is
+      # un-slugged here rather than left reading "Hedge_fund".
+      "role": (snippet.get("trader_type") or "").replace("_", " "),
       "designed": designed.get(name, ""),
       "stats": stats,
       "decisions": len(own),
@@ -550,10 +672,15 @@ def trading_poll(request, sim_code):
 
 def trading_persona_state(request, sim_code, step, persona_name):
   """
-  Per-agent detail panel for the trading map. Like replay_persona_state, but
+  Per-agent detail page for the trading map. Like replay_persona_state, but
   sourced from sim_data.py so it carries the requested step's decision,
   reasoning, and retry/fallback status alongside the static persona snippet
   from scratch.json -- not just the static snapshot.
+
+  The page also answers "what did the filter actually do to this agent", which
+  needs three fields the movement record doesn't carry (the raw request, the
+  hallucination kind, the disposition). Those come from build_decisions(),
+  matched on step+agent.
   """
   step = int(step)
   persona_name_underscore = persona_name
@@ -564,21 +691,76 @@ def trading_persona_state(request, sim_code, step, persona_name):
   step_record = replay["movement"].get(step, {}).get(persona_name)
 
   # Fall back to the nearest earlier step that has a record for this persona,
-  # since a given step may not have one for every agent.
+  # since a given step may not have one for every agent. record_step is the
+  # step the shown decision actually came from -- it is not always `step`, and
+  # labelling it as `step` would misreport the run.
+  record_step = step if step_record is not None else None
   if step_record is None:
     for s in sorted(replay["movement"].keys(), reverse=True):
       if s <= step and persona_name in replay["movement"][s]:
         step_record = replay["movement"][s][persona_name]
+        record_step = s
         break
+
+  # The filter's side of the same decision. Absent on older logs, which is a
+  # real distinction -- the template says so rather than showing a blank.
+  decision = None
+  agent_decisions = [d for d in sim_data.build_decisions(sim_code)
+                     if d["agent"] == persona_name]
+  if record_step is not None:
+    for d in agent_decisions:
+      if d["step"] == record_step:
+        decision = d
+        break
+
+  # Run-level totals for this agent, so the page reads as a dossier rather than
+  # a single frame. Same trade-attempt rule the run explorer uses.
+  trades = sum(1 for d in agent_decisions if d["action"] in ("buy", "sell"))
+  hallucinations = sum(1 for d in agent_decisions if d["hallucination"])
+
+  # The logged outcome string is a sentence plus, usually, the model reasoning
+  # appended verbatim. The reasoning is quoted in its own block below it, so
+  # echoing it twice on one card is noise -- keep only the sentence.
+  outcome = ""
+  if step_record:
+    outcome = (step_record.get("outcome") or "").strip()
+    reasoning = (step_record.get("reasoning") or "").strip()
+    if reasoning and reasoning in outcome:
+      outcome = outcome.replace(reasoning, "").strip()
+
+  # Thousands separators, done here rather than in the template: floatformat
+  # does not group, and humanize is not installed.
+  def _money(v):
+    try:
+      return "{:,.0f}".format(float(v))
+    except (TypeError, ValueError):
+      return None
+
+  peers = []
+  for p in replay["persona_names"]:
+    peers += [{"original": p,
+               "underscore": p.replace(" ", "_"),
+               "is_current": p == persona_name}]
 
   context = {
     "sim_code": sim_code,
     "step": step,
+    "record_step": record_step,
+    "is_stale_frame": record_step is not None and record_step != step,
     "persona_name": persona_name,
     "persona_name_underscore": persona_name_underscore,
     "snippet": snippet,
     "record": step_record,
     "has_record": step_record is not None,
+    "decision": decision,
+    "outcome": outcome,
+    "portfolio_value_fmt": _money(step_record.get("portfolio_value")) if step_record else None,
+    "cash_fmt": _money(step_record.get("cash")) if step_record else None,
+    "peers": peers,
+    "decision_count": len(agent_decisions),
+    "trades": trades,
+    "hallucinations": hallucinations,
+    "is_running": replay["is_running"],
   }
   template = "persona_state/trading_persona_state.html"
   return render(request, template, context)

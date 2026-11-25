@@ -235,7 +235,39 @@ def _strip_json_wrapper(response_text: str) -> str:
 	return text
 
 
+# What gpt_structure.ollama_request() returns when the SERVER failed: it could
+# not be reached, it timed out, it answered with an HTTP error, or it sent
+# something that was not a completion at all.
+OLLAMA_ERROR_SENTINEL = "OLLAMA ERROR"
+
+# The error reason recorded for that case. Deliberately distinct from
+# "response was not valid JSON": a dead server is infrastructure, a model that
+# cannot emit JSON is the thing being measured, and the sentinel made them
+# indistinguishable because it is itself not valid JSON. Every fallback rate
+# measured while the server was flaky was therefore inflated by server
+# failures. Run 06 happened to be clean (0 OLLAMA ERROR across all 16 configs),
+# which is why its numbers are unaffected by this split.
+SERVER_ERROR_REASON = "ollama server error"
+
+
+def is_server_error(error: Optional[str]) -> bool:
+	"""
+	True if a validation error was caused by the server, not by the model.
+
+	Used by the report so a server failure is counted as neither a
+	hallucination nor a parser fallback. Reading the reason string rather than
+	the raw response keeps the check in one place, and old logs still carry the
+	literal "OLLAMA ERROR" text so they parse as before.
+	"""
+	return error == SERVER_ERROR_REASON
+
+
 def _parse_json_response(response_text: str) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
+	# Check the sentinel BEFORE attempting to parse. The sentinel is not valid
+	# JSON, so without this branch a server outage arrives here and is recorded
+	# as "response was not valid JSON", i.e. as the model's failure.
+	if isinstance(response_text, str) and OLLAMA_ERROR_SENTINEL in response_text:
+		return None, SERVER_ERROR_REASON
 	try:
 		response = json.loads(_strip_json_wrapper(response_text))
 	except json.JSONDecodeError:

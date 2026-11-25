@@ -1,0 +1,20 @@
+{
+  "known_stocks": {
+    "NVDA": {
+      "sector": "semiconductors",
+      "last_known_price": 192.2,
+      "notes": [
+        "Strong momentum leader; press on confirmation"
+      ]
+    },
+    "TSLA": {
+      "sector": "electric vehicles",
+      "last_known_price": 371.18,
+      "notes": [
+        "High beta, big intraday ranges — primary momentum vehicle"
+      ]
+    }
+  },
+  "known_agents": [],
+  "market_context": "Momentum is everything. Concentrate and press winners. Low cash."
+}
