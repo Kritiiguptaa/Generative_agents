@@ -176,6 +176,50 @@ class RunSweepEndToEnd(unittest.TestCase):
         self.assertIn("FORCE_RESUME=1 set", r.stdout)
 
 
+@unittest.skipUnless(HAVE_BASH and shutil.which("pgrep"), "needs bash and pgrep")
+class CompareForksSmoke(unittest.TestCase):
+    """compare_forks_smoke.sh with a fake python: one run per fork and seed, no overlap."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.shim = os.path.join(self.tmp.name, "shim")
+        os.makedirs(self.shim)
+        self.calls = os.path.join(self.tmp.name, "calls.txt")
+        _script(os.path.join(self.shim, "python"),
+                f'echo "$@" >> {self.calls}\necho "HALLUCINATION REPORT"\n')
+        self.out = os.path.join(self.tmp.name, "cmp")
+
+    def _run(self, **extra):
+        env = dict(os.environ, PATH=self.shim + os.pathsep + os.environ["PATH"],
+                   OUT=self.out, FORKS="base_trading base_trading_active", SEEDS="42 43", STEPS="3")
+        env.update(extra)
+        return subprocess.run(["bash", os.path.join(BACKEND, "compare_forks_smoke.sh")],
+                              capture_output=True, text=True, env=env, cwd=BACKEND)
+
+    def test_runs_every_fork_and_seed_with_the_same_settings_and_named_logs(self):
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(self.calls) as f:
+            calls = f.read().splitlines()
+        self.assertEqual(len(calls), 4)
+        for fork in ("base_trading", "base_trading_active"):
+            for seed in ("42", "43"):
+                self.assertTrue(os.path.exists(os.path.join(self.out, fork, f"mw_s{seed}.log")))
+                self.assertTrue(any(f"--fork {fork} " in c and f"--seed {seed} " in c and
+                                    f"--sim cmp_{fork}_mw_s{seed} " in c for c in calls), (fork, seed))
+        self.assertTrue(all("--steps 3 " in c and "--temperature 0.7 " in c and "--fresh" in c for c in calls))
+
+    def test_refuses_to_start_while_a_trading_reverie_process_is_running(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "trading_reverie.py"])
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        time.sleep(0.3)
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("already running", r.stdout)
+        self.assertFalse(os.path.exists(self.calls))
+
+
 class CommitRecordedAtRunStart(unittest.TestCase):
     """A checkout made mid-run must not change the commit the report records."""
 

@@ -1,0 +1,109 @@
+{
+  "vision_r": 4,
+  "att_bandwidth": 8,
+  "retention": 8,
+  "curr_time": "January 15, 2024, 08:00:00",
+  "curr_tile": [
+    0,
+    0
+  ],
+  "name": "Tomas Herrera",
+  "first_name": "Tomas",
+  "last_name": "Herrera",
+  "age": 39,
+  "innate": "balanced, disciplined, rule-based, steady",
+  "learned": "Tomas Herrera is a full-time swing trader with 11 years of experience. He holds positions for several days, takes partial profits along the way, and rebalances toward target weights. He is comfortable with moderate risk but avoids concentrating in one name.",
+  "currently": "Tomas has $100,000 in cash and no open positions. He is looking for a swing entry in AMD, TSLA or AAPL and plans to scale in over a few sessions.",
+  "lifestyle": "Tomas reviews charts in the evening, sets alerts, trades a few times a week, and checks positions at midday.",
+  "living_area": "Trading Floor:Tomas Herrera's Desk",
+  "daily_plan_req": "Tomas Herrera trades a $100,000 swing portfolio. He scales into positions, takes partial profits, and rebalances so no single name dominates.",
+  "daily_req": [
+    "Review overnight charts and alerts at 8:00 AM",
+    "Identify one or two swing setups at 9:00 AM",
+    "Scale into a position between 9:45 AM and 11:00 AM",
+    "Midday check of open positions at 12:30 PM",
+    "Take partial profit or rebalance at 2:30 PM",
+    "Update the trade journal at 4:00 PM"
+  ],
+  "trading_strategy": "Swing trade for several days. Scale into positions, never more than 5% of the portfolio per trade. Take half off at a 10% gain and cut at a 6% loss. Keep any single name under 30% of the portfolio. Rebalance toward even weights.",
+  "recent_decisions": [
+    {
+      "timestep": "08:00 AM",
+      "action": "no positions yet",
+      "reason": "waiting for a swing setup to scale into"
+    }
+  ],
+  "active_constraints": {
+    "max_position_size": 500,
+    "max_single_trade_value": 5000,
+    "max_portfolio_concentration": 0.3,
+    "stop_loss_threshold": 0.06,
+    "profit_take_threshold": 0.1,
+    "no_trade_before": "09:30",
+    "no_new_positions_after": "15:30",
+    "blocked_stocks": [],
+    "short_selling_enabled": false,
+    "max_open_positions": 4
+  },
+  "market_state": {
+    "session": "pre-market",
+    "trend": "bullish",
+    "vix": 18.5,
+    "fed_meeting_this_week": false,
+    "major_events_today": [
+      "CPI data at 8:30 AM"
+    ]
+  },
+  "concept_forget": 100,
+  "daily_reflection_time": 180,
+  "daily_reflection_size": 5,
+  "overlap_reflect_th": 2,
+  "kw_strg_event_reflect_th": 4,
+  "kw_strg_thought_reflect_th": 4,
+  "recency_w": 1,
+  "relevance_w": 1,
+  "importance_w": 1,
+  "recency_decay": 0.995,
+  "importance_trigger_max": 120,
+  "importance_trigger_curr": 120,
+  "importance_ele_n": 0,
+  "thought_count": 5,
+  "f_daily_schedule": [],
+  "f_daily_schedule_hourly_org": [],
+  "act_address": null,
+  "act_start_time": null,
+  "act_duration": null,
+  "act_description": "reviewing the market before the open",
+  "act_pronunciatio": "📊🔍",
+  "act_event": [
+    "Tomas Herrera",
+    "reviews",
+    "market data"
+  ],
+  "act_obj_description": null,
+  "act_obj_pronunciatio": null,
+  "act_obj_event": [
+    null,
+    null,
+    null
+  ],
+  "chatting_with": null,
+  "chat": null,
+  "chatting_with_buffer": {},
+  "chatting_end_time": null,
+  "act_path_set": false,
+  "planned_path": [],
+  "cash_balance": 100000.0,
+  "positions": {},
+  "trader_type": "swing_trader",
+  "specialization": "swing trading large-cap tech",
+  "risk_tolerance": "moderate",
+  "risk_limit_per_trade": 0.05,
+  "watchlist": [
+    "AMD",
+    "TSLA",
+    "AAPL"
+  ],
+  "pnl_today": 0.0,
+  "pnl_total": 0.0
+}
