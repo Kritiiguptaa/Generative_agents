@@ -203,7 +203,7 @@ class Aggregation(unittest.TestCase):
         s.write("mw_s42.log", log(block("Mo Mod", persona="N/A", scored=0, drift=0)))
         rows, notes = s.load()
         text = A.report(rows, notes)
-        self.assertNotIn("nan", text)
+        self.assertNotRegex(text, r"\bnan\b")
         self.assertRegex(text, r"Mo Mod\s+moderate\s+\S+\s+n/a")
 
     def test_csv_has_one_row_per_arm_seed_agent(self):
@@ -262,6 +262,102 @@ class MergedReportFields(unittest.TestCase):
         for r in rows:
             r["bucket"] = "aggressive"
         self.assertAlmostEqual(A.seed_bucket_metrics(rows)[("mw", "aggressive", 42)]["hold_able"], 75.0)
+
+
+def _with_meta(text, commit="abc1234", model="mistral", temp="0.7", dirty="no"):
+    """Insert the provenance lines a real report prints under its header."""
+    meta = (f"Model           : {model}\nTemperature     : {temp}\nCommit          : {commit}\n"
+            f"Tree dirty      : {dirty}\n")
+    return text.replace("PER-AGENT\n", meta + "PER-AGENT\n", 1)
+
+
+class FullSweepChecks(unittest.TestCase):
+    """What a full sweep needs: weighted persona, consistent provenance, aligned seeds."""
+
+    def setUp(self):
+        self.s = _Sweep()
+        self.addCleanup(self.s.close)
+
+    def test_persona_is_weighted_by_scored_decisions_not_by_agent(self):
+        rows = [dict(arm="mw", seed=42, agent="Few", bucket="moderate", persona=0.0, drift=1, scored=1,
+                     decisions=100, halluc=0, attempts=0),
+                dict(arm="mw", seed=42, agent="Many", bucket="moderate", persona=1.0, drift=0, scored=100,
+                     decisions=100, halluc=0, attempts=0)]
+        m = A.seed_bucket_metrics(rows)[("mw", "moderate", 42)]
+        self.assertAlmostEqual(m["persona"], 100 / 101)          # not the 0.5 an unweighted mean gives
+
+    def test_an_agent_with_no_scored_decisions_carries_no_weight(self):
+        rows = [dict(arm="mw", seed=42, agent="None", bucket="moderate", persona=None, drift=0, scored=0,
+                     decisions=100, halluc=0, attempts=0),
+                dict(arm="mw", seed=42, agent="Some", bucket="moderate", persona=0.8, drift=0, scored=10,
+                     decisions=100, halluc=0, attempts=0)]
+        self.assertAlmostEqual(A.seed_bucket_metrics(rows)[("mw", "moderate", 42)]["persona"], 0.8)
+        rows[1]["scored"] = 0
+        self.assertIsNone(A.seed_bucket_metrics(rows)[("mw", "moderate", 42)]["persona"])
+
+    def test_logs_from_one_experiment_report_a_single_value_for_each_field(self):
+        s = self.s
+        s.write("mw_s42.log", _with_meta(log(block("Ann Aggr"))))
+        s.write("base_s42.log", _with_meta(log(block("Ann Aggr"))))
+        rows, notes = s.load()
+        text = A.consistency_section(rows, [])
+        self.assertIn("Commit       abc1234   (all 2 logs)", text)
+        self.assertNotIn("MIXED", text)
+        self.assertNotIn("CHECK THIS", text)
+
+    def test_a_mid_sweep_commit_change_is_called_out_with_the_logs_that_differ(self):
+        s = self.s
+        s.write("mw_s42.log", _with_meta(log(block("Ann Aggr")), commit="abc1234"))
+        s.write("mw_s43.log", _with_meta(log(block("Ann Aggr")), commit="def5678"))
+        s.write("base_s42.log", _with_meta(log(block("Ann Aggr")), commit="abc1234"))
+        rows, notes = s.load()
+        text = A.consistency_section(rows, [])
+        self.assertIn("Commit       MIXED", text)
+        self.assertIn("abc1234: 2 logs", text)
+        self.assertIn("def5678: 1 logs (mw_s43)", text)
+        self.assertIn("CHECK THIS BEFORE COMPARING", text)
+
+    def test_a_dirty_tree_and_unrecorded_provenance_are_flagged(self):
+        s = self.s
+        s.write("mw_s42.log", _with_meta(log(block("Ann Aggr")), dirty="yes"))
+        rows, _ = s.load()
+        self.assertIn("local edits", A.consistency_section(rows, []))
+        s.write("base_s42.log", log(block("Ann Aggr")))                    # no provenance block at all
+        rows, _ = s.load()
+        text = A.consistency_section(rows, [])
+        self.assertIn("MIXED", text)
+        self.assertIn("not recorded", text)
+
+    def test_the_values_a_real_report_prints_are_understood(self):
+        s = self.s
+        s.write("mw_s42.log", _with_meta(log(block("Ann Aggr")), dirty="no"))
+        rows, _ = s.load()
+        clean = A.consistency_section(rows, [])
+        self.assertIn("Tree dirty   no", clean)
+        self.assertNotIn("CHECK THIS", clean)                    # a clean tree is not a problem
+        s.write("mw_s42.log", _with_meta(log(block("Ann Aggr")), commit="NOT FOUND"))
+        rows, _ = s.load()
+        self.assertIn("not recorded", A.consistency_section(rows, []))
+
+    def test_paired_logs_count_towards_consistency(self):
+        s = self.s
+        s.write("mw_s42.log", _with_meta(log(block("Ann Aggr")), commit="abc1234"))
+        s.write("pmw_s42.log", paired_log().replace("Model           : mistral",
+                "Model           : mistral\nCommit          : zzz9999"))
+        rows, _ = s.load()
+        paired, _ = A.load_paired(s.out)
+        self.assertIn("MIXED", A.consistency_section(rows, paired))
+
+    def test_arms_that_ran_different_seeds_are_noted(self):
+        s = self.s
+        s.write("mw_s42.log", log(block("Ann Aggr")))
+        s.write("mw_s43.log", log(block("Ann Aggr")))
+        s.write("base_s42.log", log(block("Ann Aggr")))
+        rows, notes = s.load()
+        self.assertIn("DIFFERENT seeds", A.report(rows, notes))
+        s.write("base_s43.log", log(block("Ann Aggr")))
+        rows, notes = s.load()
+        self.assertNotIn("DIFFERENT seeds", A.report(rows, notes))
 
 
 class WilsonInterval(unittest.TestCase):

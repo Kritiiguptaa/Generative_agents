@@ -158,6 +158,17 @@ def load_personas(storage, fork):
     return res
 
 
+META_LINE = re.compile(r"^(Model|Temperature|Commit|Tree dirty|Ollama)\s*:\s*(.+?)\s*$", re.M)
+
+
+def parse_meta(text):
+    """The provenance block a report prints (model, temperature, commit, dirty flag)."""
+    meta = {}
+    for m in META_LINE.finditer(text):
+        meta.setdefault(m[1], m[2])
+    return meta
+
+
 def load_sweep(out_dir, buckets):
     """-> (rows, notes). One row per (arm, seed, agent)."""
     rows, notes = [], []
@@ -177,8 +188,9 @@ def load_sweep(out_dir, buckets):
         if not parsed:
             notes.append(f"unparsed {fn}: no per-agent blocks (a paired_eval report?)")
             continue
+        meta = parse_meta(text)
         for agent, r in parsed.items():
-            rows.append(dict(arm=arm, seed=seed, agent=agent,
+            rows.append(dict(arm=arm, seed=seed, agent=agent, meta=meta,
                              bucket=buckets.get(agent, "unknown"), **r))
     return rows, notes
 
@@ -251,7 +263,7 @@ def load_paired(out_dir):
         if parsed is None:
             notes.append(f"unparsed {fn}: a paired report this script could not read")
             continue
-        res.append(dict(parsed, arm=m["arm"], seed=int(m["seed"])))
+        res.append(dict(parsed, arm=m["arm"], seed=int(m["seed"]), meta=parse_meta(text)))
     return res, notes
 
 
@@ -401,6 +413,21 @@ def _rate(num, den):
     return None if not den else 100.0 * num / den
 
 
+def _weighted_persona(rs):
+    """
+    Persona average weighted by each agent's SCORED decisions, or None if none.
+
+    An unweighted mean of per-agent averages let an agent scored on 1 decision
+    count as much as one scored on 100: a moderate agent that mostly holds has an
+    average built on a handful of buys, and it dragged the bucket's number to
+    wherever that handful happened to land. Agents with no scored decisions
+    (persona n/a) carry no weight.
+    """
+    pr = [r for r in rs if r.get("persona") is not None and r.get("scored", 0) > 0]
+    n = sum(r["scored"] for r in pr)
+    return sum(r["persona"] * r["scored"] for r in pr) / n if n else None
+
+
 def seed_bucket_metrics(rows):
     """{(arm, bucket, seed): metrics}. Agents are pooled WITHIN a seed and bucket."""
     grp = defaultdict(list)
@@ -418,8 +445,7 @@ def seed_bucket_metrics(rows):
             halluc=_rate(sum(r["halluc"] for r in rs), sum(r["attempts"] for r in rs)),
             attempts=sum(r["attempts"] for r in rs),
             contra=_rate(sum(r.get("contra", 0) for r in rs), sum(r.get("reasoned", 0) for r in rs)),
-            persona=statistics.mean([r["persona"] for r in rs if r.get("persona") is not None] or [float("nan")])
-            if any(r.get("persona") is not None for r in rs) else None,
+            persona=_weighted_persona(rs),
             drift_per100=_rate(sum(r.get("drift", 0) for r in rs), dec),
             scored=sum(r.get("scored", 0) for r in rs),
             decisions=dec,
@@ -460,6 +486,50 @@ def _cov_text(scored, decisions):
     return "n/a" if not decisions else f"{100.0 * scored / decisions:.0f}% ({scored}/{decisions})"
 
 
+def consistency_section(rows, paired):
+    """
+    Did every log come from the same code and settings?
+
+    A sweep whose configs ran on different commits, models or temperatures is not
+    one experiment. Run 07's mw_s43 finished after a mid-sweep checkout and was
+    labelled with code it never ran; this is the check that would have shown it.
+    """
+    logs = {}
+    for r in rows:
+        logs[(r["arm"], r["seed"])] = r.get("meta") or {}
+    for r in paired or []:
+        logs[(r["arm"], r["seed"])] = r.get("meta") or {}
+    out = ["\n## Run consistency (provenance recorded in each log)"]
+    if not logs:
+        return "\n".join(out + ["  no logs"])
+    problems = 0
+    for field in ("Commit", "Model", "Temperature", "Tree dirty"):
+        vals = {}
+        for key, meta in logs.items():
+            vals.setdefault(meta.get(field, "not recorded"), []).append(f"{key[0]}_s{key[1]}")
+        if len(vals) == 1:
+            v = next(iter(vals))
+            # The report prints the dirty flag as yes/no and an unknown value as
+            # NOT FOUND (metrics_recorder.UNKNOWN); a log with no provenance block
+            # at all has no such line, which this function calls "not recorded".
+            flag = "   <- the tree had local edits, so the code is not reproducible from the commit" \
+                if field == "Tree dirty" and v.strip().lower() in ("yes", "true") else ""
+            unrecorded = v.strip().upper() in ("NOT FOUND", "NOT RECORDED")
+            if unrecorded:
+                flag = "   <- not recorded"
+            problems += bool(flag)
+            out.append(f"  {field:<12} {v}   (all {len(logs)} logs){flag}")
+        else:
+            problems += 1
+            out.append(f"  {field:<12} MIXED across logs:")
+            for v, names in sorted(vals.items(), key=lambda kv: -len(kv[1])):
+                shown = ", ".join(sorted(names)[:6]) + (" ..." if len(names) > 6 else "")
+                out.append(f"      {v}: {len(names)} logs ({shown})")
+    if problems:
+        out.append("  CHECK THIS BEFORE COMPARING: these logs may not describe one experiment.")
+    return "\n".join(out)
+
+
 def report(rows, notes, paired=None):
     out = []
     arms = sorted({r["arm"] for r in rows})
@@ -469,8 +539,13 @@ def report(rows, notes, paired=None):
     for arm in arms:
         have = sorted({r["seed"] for r in rows if r["arm"] == arm})
         out.append(f"  {arm:<10} seeds present: {have}")
+    seed_sets = {arm: tuple(sorted({r["seed"] for r in rows if r["arm"] == arm})) for arm in arms}
+    if len(set(seed_sets.values())) > 1:
+        out.append("  NOTE the arms ran DIFFERENT seeds, so the per-arm means below cover different "
+                   "seeds; only the paired section compares like with like.")
     for n in notes:
         out.append(f"  NOTE {n}")
+    out.append(consistency_section(rows, paired))
     if not rows:
         if paired:
             out.append(paired_section(paired))
@@ -547,12 +622,12 @@ def report(rows, notes, paired=None):
         done.add(k)
         rs = [x for x in rows if (x["arm"], x["agent"]) == k]
         hold = statistics.mean(x["hold_pct"] for x in rs if "hold_pct" in x)
-        per = [x["persona"] for x in rs if x.get("persona") is not None]
+        per = _weighted_persona(rs)
         sc = sum(x.get("scored", 0) for x in rs)
         dc = sum(x.get("decisions", 0) for x in rs)
         cov = f"{100.0 * sc / dc:.0f}%" if dc else "n/a"
         out.append(f"  {r['arm']:<8}{r['agent']:<18}{r['bucket']:<14}{hold:>8.1f}"
-                   f"{(f'{statistics.mean(per):.2f}' if per else 'n/a'):>9}{cov:>9}"
+                   f"{(f'{per:.2f}' if per is not None else 'n/a'):>9}{cov:>9}"
                    f"{statistics.mean(x.get('drift', 0) for x in rs):>10.1f}"
                    f"{statistics.mean(x.get('buy', 0) for x in rs):>7.1f}{len(rs):>7}")
 
