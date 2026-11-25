@@ -246,9 +246,11 @@ def score_persona_consistency(reasoning: str, persona,
 
     Checks up to two independent dimensions; each violation subtracts from 1.0:
       - Language-risk mismatch  (aggressive words for conservative agent, etc.)
-      - Watchlist               (BUYING an off-watchlist symbol, or, when no
-                                 trade was requested, naming only off-watchlist
-                                 symbols in the reasoning)
+      - Watchlist               (BUYING an off-watchlist symbol; when the order
+                                 is unknown, naming only off-watchlist symbols
+                                 in the reasoning. A HOLD or SELL that merely
+                                 mentions an off-watchlist stock is not scored
+                                 on this dimension)
 
     `requested` is the order the model asked for, BEFORE the filter touched it.
     What the agent tried to do is better evidence of character than what it
@@ -320,7 +322,18 @@ def score_persona_consistency(reasoning: str, persona,
     #
     # Reasoning that names no symbol at all carries no evidence either way, so
     # the check does not run and is not counted in the denominator.
-    if watchlist and reasoning and not buy_checked:
+    #
+    # NOT run when the order is an explicit HOLD or SELL. Naming an off-watchlist
+    # stock in the reasoning of a HOLD is market commentary, not acting on it: in
+    # the first 100-step nine-agent run a conservative agent that never traded
+    # (watchlist AAPL, GOOGL) was scored 0.50 five times for writing that Tesla
+    # recalls and an NVDA rally were reasons to wait. That is what a cautious
+    # agent says. The act that can contradict a watchlist is a BUY, which the
+    # check at the top of this function already scores from the order itself.
+    # Without an explicit order (requested has no action) the reasoning is all
+    # there is, so the check still runs for those callers.
+    holds_or_exits = str(requested.get("action") or "").lower() in ("hold", "sell")
+    if watchlist and reasoning and not buy_checked and not holds_or_exits:
         watch_up = {s.upper() for s in watchlist}
         mentioned = {sym for sym in _ALL_KNOWN_SYMBOLS
                      if _mentions_symbol(reasoning_upper, sym)}

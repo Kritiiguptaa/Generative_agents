@@ -281,6 +281,56 @@ class ConservativeLimitLanguage(unittest.TestCase):
                                  PERSONA_DRIFT_THRESHOLD, text)
 
 
+class HoldCommentaryIsNotDrift(unittest.TestCase):
+    """
+    Regression: the reasoning-symbol check scored a HOLD 0.50 when every stock
+    it named was off the watchlist. In the first 100-step nine-agent run, a
+    conservative agent that never traded (watchlist AAPL, GOOGL) hit this five
+    times for sentences like "Elon Musk selling a significant amount of Tesla
+    shares might indicate some market volatility". Naming a stock while holding
+    is commentary; only acting on it can contradict a watchlist.
+    """
+
+    HOLD = {"action": "hold", "symbol": None, "quantity": 0}
+
+    def setUp(self):
+        self.agent = _Agent(name="Margaret Okafor", tol="conservative",
+                            watchlist=("AAPL", "GOOGL"))
+
+    def test_the_run_sentences_score_in_character_on_a_hold(self):
+        for text in (
+            "I am cautious. The recent news about Tesla recalls and NHTSA "
+            "autopilot safety probe increases my concern.",
+            "Given the recent gains in NVDA and the potential supply "
+            "bottleneck, it would be prudent to wait for a mo",
+            "The CPI print raising fears of resumed hikes and Elon Musk selling "
+            "a significant amount of Tesla shares might indicate volatility.",
+        ):
+            self.assertEqual(1.0, score_persona_consistency(text, self.agent, self.HOLD), text)
+
+    def test_a_sell_that_mentions_an_off_watchlist_stock_is_not_drift(self):
+        sell = {"action": "sell", "symbol": "TSLA", "quantity": 2}
+        self.assertEqual(1.0, score_persona_consistency(
+            "Trimming TSLA because of the recall news.", self.agent, sell))
+
+    def test_buying_an_off_watchlist_stock_still_flags(self):
+        buy = {"action": "buy", "symbol": "TSLA", "quantity": 2}
+        self.assertLessEqual(score_persona_consistency(
+            "Buying TSLA on the dip.", self.agent, buy), PERSONA_DRIFT_THRESHOLD)
+
+    def test_without_an_order_the_reasoning_check_still_runs(self):
+        # Callers that cannot say what the agent did keep the old behaviour.
+        self.assertLessEqual(score_persona_consistency(
+            "Tesla recalls worry me.", self.agent), PERSONA_DRIFT_THRESHOLD)
+        self.assertLessEqual(score_persona_consistency(
+            "Tesla recalls worry me.", self.agent, {}), PERSONA_DRIFT_THRESHOLD)
+
+    def test_aggressive_wording_on_a_hold_still_flags(self):
+        self.assertLessEqual(score_persona_consistency(
+            "Not buying today, but I am going all-in tomorrow.", self.agent, self.HOLD),
+            PERSONA_DRIFT_THRESHOLD)
+
+
 class VenueRejection(unittest.TestCase):
     """
     Regression: execute_order() returns {"status": "rejected"} with no
