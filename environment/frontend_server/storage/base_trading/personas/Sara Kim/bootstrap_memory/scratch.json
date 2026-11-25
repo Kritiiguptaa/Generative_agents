@@ -69,6 +69,7 @@
   "specialization": "news-driven momentum",
   "risk_tolerance": "moderate-high",
   "risk_limit_per_trade": 0.08,
+  "stop_loss_pct": 0.08,
   "watchlist": ["NVDA", "TSLA", "AAPL", "GOOGL"],
   "pnl_today": 0.0,
   "pnl_total": 0.0,

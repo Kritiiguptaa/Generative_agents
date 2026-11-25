@@ -1586,6 +1586,7 @@
         "action_hallucinations": 6,
         "active_decisions": 9,
         "avg_persona_consistency": 1.0,
+        "capacity_hold_rate_pct": 55.0,
         "caught_pre_execution": 4,
         "end_portfolio_usd": 445799.66,
         "error_reasons": {
@@ -1640,6 +1641,7 @@
         "action_hallucinations": 10,
         "active_decisions": 10,
         "avg_persona_consistency": 0.93,
+        "capacity_hold_rate_pct": 50.0,
         "caught_pre_execution": 8,
         "end_portfolio_usd": 25365.85,
         "error_reasons": {
@@ -1694,6 +1696,7 @@
         "action_hallucinations": 10,
         "active_decisions": 11,
         "avg_persona_consistency": 0.75,
+        "capacity_hold_rate_pct": 45.0,
         "caught_pre_execution": 7,
         "end_portfolio_usd": 172599.73,
         "error_reasons": {

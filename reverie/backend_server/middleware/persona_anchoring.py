@@ -45,13 +45,18 @@ from typing import Optional
 # fire. Use `score <= PERSONA_DRIFT_THRESHOLD` at call sites.
 PERSONA_DRIFT_THRESHOLD = 0.5
 
-# An aggressive agent that HOLDs on more than this fraction of its decisions is
-# out of character for the run, whatever its reasoning says. The per-decision
+# An aggressive agent that HOLDs on more than this fraction of the decisions
+# where it COULD have bought is out of character for the run. The per-decision
 # score cannot see this: a HOLD that names no symbol and uses no fearful phrase
-# passes every check, which is how Marcus Webb ("buy on breakouts and dips, go
-# big") held 70% of a smoke run while scoring 1.00.
+# passes every check.
+#
+# Only decisions with buying capacity count. Run 07 measured this over all
+# decisions and flagged Marcus Webb in all 8 independent configs, both arms,
+# at 84-96% HOLD -- but he spends his $25k in the first steps, and an
+# aggressive trader holding because he is fully invested is in character. A
+# flag that fires on every config cannot tell the arms apart.
 # shortcut: 0.5 is a judgement call, not calibrated; replace with the baseline
-# arm's measured hold rate once the run 07 sweep gives one.
+# arm's measured capacity-hold rate once a sweep on this definition gives one.
 AGGRESSIVE_MAX_HOLD_RATE = 0.5
 
 
@@ -214,16 +219,47 @@ def _mentions_symbol(reasoning_upper: str, symbol: str) -> bool:
                for alias in _SYMBOL_ALIASES.get(symbol, ()))
 
 
+def strategy_exits_due(persona, prices: dict) -> set:
+    """
+    Symbols the agent's OWN stop-loss or take-profit says to sell now.
+
+    Read from the persona's stop_loss_pct / take_profit_pct (fractions), which
+    encode rules its strategy text already states ("cut losers at 8% loss
+    without exception"). A persona without them has no exits due. Must be
+    computed BEFORE the step's trade executes: afterwards a compliant sale has
+    removed the position, and compliance would go uncounted.
+    """
+    s = persona.scratch
+    stop = getattr(s, "stop_loss_pct", None)
+    take = getattr(s, "take_profit_pct", None)
+    due = set()
+    if stop is None and take is None:
+        return due
+    for sym, pos in (getattr(s, "positions", None) or {}).items():
+        avg = pos.get("avg_price")
+        if not pos.get("qty") or not avg or sym not in prices:
+            continue
+        change = (prices[sym] - avg) / avg
+        if (stop is not None and change <= -stop) or \
+           (take is not None and change >= take):
+            due.add(sym)
+    return due
+
+
 def score_persona_consistency(reasoning: str, persona,
-                              requested: Optional[dict] = None) -> Optional[float]:
+                              requested: Optional[dict] = None,
+                              exits_due: Optional[set] = None) -> Optional[float]:
     """
     Heuristic consistency score in [0.0, 1.0], or None when not scoreable.
 
-    Checks up to two independent dimensions; each violation subtracts from 1.0:
+    Checks up to three independent dimensions; each violation subtracts from 1.0:
       - Language-risk mismatch  (aggressive words for conservative agent, etc.)
       - Watchlist               (BUYING an off-watchlist symbol, or, when no
                                  trade was requested, naming only off-watchlist
                                  symbols in the reasoning)
+      - Own exit rules          (a stop-loss or take-profit was due, from
+                                 strategy_exits_due(), and the agent did not
+                                 sell one of those symbols)
 
     `requested` is the order the model asked for, BEFORE the filter touched it.
     What the agent tried to do is better evidence of character than what it
@@ -263,6 +299,18 @@ def score_persona_consistency(reasoning: str, persona,
     if buy_checked:
         checks += 1
         if bought not in watchlist:
+            violations += 1
+
+    # 0b. Own exit rules. Action against the agent's stated strategy, from the
+    #     portfolio, so it does not depend on wording. Not a hallucination (the
+    #     sale it skipped was legal) and not a state contradiction (that one
+    #     compares reasoning with the book, this compares the action with the
+    #     strategy), so nothing is counted twice.
+    if exits_due:
+        checks += 1
+        sold = (str(requested.get("action") or "").lower() == "sell"
+                and str(requested.get("symbol") or "").upper() in exits_due)
+        if not sold:
             violations += 1
 
     # 1. Language-risk mismatch — only meaningful when the profile commits to a
@@ -320,15 +368,24 @@ def score_persona_consistency(reasoning: str, persona,
     return round(1.0 - violations / checks, 2)
 
 
-def hold_rate_drift(hold_rate: float, persona) -> bool:
+def can_buy(persona, market) -> bool:
+    """True when the legal menu offers at least one BUY this step."""
+    from middleware.action_filtering import get_legal_actions
+    return any(a.type == "BUY" for a in get_legal_actions(persona, market))
+
+
+def hold_rate_drift(hold_rate: Optional[float], persona) -> bool:
     """
     True when a run's HOLD rate is out of character for the agent's profile.
 
-    Run-level, not per-decision: one HOLD is in character for anyone, holding
-    nearly all run is not for an aggressive trader. Only aggressive commits to
-    a direction here -- a moderate "high conviction only" agent (Alex Chen)
-    holding all run is following his own strategy.
+    `hold_rate` must be over the decisions where can_buy() was True; None (it
+    never could buy) is never drift. Run-level, not per-decision: one HOLD is in
+    character for anyone, holding nearly all run is not for an aggressive
+    trader. Only aggressive commits to a direction here -- a moderate "high
+    conviction only" agent (Alex Chen) holding all run follows his strategy.
     """
+    if hold_rate is None:
+        return False
     tol = _normalise_risk_tolerance(getattr(persona.scratch, "risk_tolerance", None))
     return tol == "aggressive" and hold_rate > AGGRESSIVE_MAX_HOLD_RATE
 

@@ -35,7 +35,7 @@ compression enforces and could be trimmed away.
 
 | File | Status | Why it is still here |
 |---|---|---|
-| `persona_anchoring.py` | **part live, part legacy** | `score_persona_consistency()`, `hold_rate_drift()` and `PERSONA_DRIFT_THRESHOLD` are live, used by both harnesses as a post-hoc measure. `create_persona_anchor()` and `anchor_memory_context()` are legacy with no caller: ID-RAG replaced them. |
+| `persona_anchoring.py` | **part live, part legacy** | `score_persona_consistency()`, `strategy_exits_due()`, `can_buy()`, `hold_rate_drift()` and `PERSONA_DRIFT_THRESHOLD` are live, used by both harnesses as a post-hoc measure. `create_persona_anchor()` and `anchor_memory_context()` are legacy with no caller: ID-RAG replaced them. |
 
 **This is the "layer 3" discrepancy.** The capstone report describes layer 3 as
 persona anchoring, an intervention that builds an identity block. In the code
@@ -43,9 +43,12 @@ that function has no caller, and what runs is a measurement applied after the
 decision. So layer 3 is a metric, not a layer; the anchoring intervention is
 ID-RAG (stage 2). The metric used to be saturated, 0.98 to 1.00 in both arms,
 because it read only the reasoning's wording. It now also scores the
-pre-filter request (buying off the watchlist, scoreable with no reasoning) and
-flags an aggressive agent that HOLDs most of a run (`hold_rate_drift`). Numbers
-from before that change are not comparable; see WP-G and WP9 before citing it.
+pre-filter request (buying off the watchlist, scoreable with no reasoning),
+the agent's own exit rules (`stop_loss_pct` / `take_profit_pct` in its scratch,
+via `strategy_exits_due`), and flags an aggressive agent that HOLDs on most of
+the steps where a BUY was legal (`hold_rate_drift` over `can_buy` steps). Both
+harnesses score it; the paired report shows both arms on the same states.
+Numbers from before these changes are not comparable; see WP-G and WP9.
 
 ## Removed
 
