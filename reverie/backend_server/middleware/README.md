@@ -95,3 +95,74 @@ The baseline arm keeps its own path in `trading_reverie.make_trading_decision`
 and is deliberately **not** routed through the wrapper. It is the control, and
 an arm assembled from zero components would resemble it without being it.
 Conflating the two would make the comparison circular.
+
+## Future work
+
+### Persona evidence for agents that mostly hold
+
+**The gap.** `score_persona_consistency()` scores a decision on two things: the
+language check, which exists only for conservative and aggressive profiles, and
+the order itself (a BUY of an off-watchlist symbol). A moderate profile has no
+characteristic vocabulary, and a HOLD is not an act, so a moderate agent that
+mostly holds has almost nothing scored. In the first 100-step nine-agent runs
+Alex Chen had 0 of 100 decisions scored, Tomas Herrera 1 of 100 and Sara Kim 17
+of 100, against 100 of 100 for every conservative and aggressive agent. Their
+persona average is therefore built on a handful of buys, or is `n/a`. This is a
+consequence of scoring what the agent did (4c79fa4) and of two false-positive
+fixes (the "maximum position" phrase and HOLD commentary), not a defect in any
+of them: the removed checks were measuring the wrong thing.
+
+**What is in place.** `analyze_sweep.py` prints the share of decisions the
+persona score covers next to every persona average, per arm and bucket and per
+agent, and calls out any bucket under 50%. Persona scores are therefore never
+read without their coverage. Until the check below exists, report persona
+consistency for moderate agents as "buys only, n = X" and do not interpret it.
+
+**The best fix: score a HOLD against the persona's own rules.** Every persona
+file carries numeric rules in `active_constraints` (Alex Chen: `stop_loss_threshold` 0.08,
+`profit_take_threshold` 0.15, "cut losers at 8% without exception, trim winners
+at 15%"), and the run already tracks every position's `avg_price` and the
+current prices. A HOLD that sits through a breach of the agent's own stop-loss
+or profit-take rule is out of character on an objective, state-grounded
+criterion; a HOLD with no rule triggered carries no evidence either way, which
+is the existing "not scoreable" rule. This beats keyword lists for three reasons:
+
+- It uses no vocabulary. The language check's recent bugs ("all in" inside
+  "fall in", "panic" describing the market) are the failure mode of matching
+  words; a price against a cost basis cannot make that mistake.
+- It gives moderate agents a real test. Alex's "never chases, cuts losers at 8%,
+  trims winners at 15%" is the substance of a moderate profile.
+- It is deterministic and cheap, and needs no judgement call about which phrases
+  are in character.
+
+**What it needs before it can be built.**
+
+1. Nothing reads `active_constraints` today. Check that the thresholds are
+   present and sensible for all nine personas: Marcus Webb and Sara Kim have no
+   `profit_take_threshold`, so for them only the stop-loss rule applies.
+2. The score has to be computed inside the run. `trading_log.json` records cash
+   and portfolio value per decision but not per-position cost basis or prices,
+   so it cannot be reconstructed afterwards. `score_persona_consistency()` would
+   take the prices as an argument, as the harness already passes the order.
+3. Coverage will be low and should be measured, not assumed. Most agents hold
+   cash for most of a run (about 7% of decisions were trades), so rules trigger
+   rarely. The honest outcome may be a small but objective set of scored holds,
+   which is still better than none.
+
+**Second: replace the absolute hold-rate limit with a relative one.**
+`hold_rate_drift()` flags an aggressive agent holding more than 50% of the run.
+In run07 the aggressive agent held 84-96.5% in all eight runs, baseline arm
+included, so the flag fires every time and carries no information. A roster-level
+check is more useful: flag when the profile ordering is inverted (an aggressive
+agent holding more than the conservative bucket's mean in the same run), and
+compare each agent's hold rate with the baseline arm's for the same seed.
+
+**Last resort: per-persona rationale lists.** A hold-reason lexicon per persona
+(in-character and out-of-character reasons) would score the reasoning text. It
+is keyword matching, so it inherits the weaknesses above, and it adds a
+subjective choice about what "in character" means for each of nine personas. Do
+it only if the rule check cannot be built, validate it against real logs first,
+and match whole words.
+
+**Not recommended.** An LLM judge for character. It is expensive, not
+deterministic, and substitutes one model's opinion of a persona for a measurement.

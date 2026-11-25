@@ -166,6 +166,32 @@ class Aggregation(unittest.TestCase):
         self.assertAlmostEqual(mean, 80.0)
         self.assertEqual(n, 2)
 
+    def test_persona_coverage_is_shown_and_low_coverage_is_called_out(self):
+        # a moderate agent that mostly holds: 17 of 100 decisions scored
+        s = self.s
+        s.write("mw_s42.log", log(block("Mo Mod", scored=17, persona="1.00", buy=17, hold=83.0),
+                                  block("Ann Aggr", scored=100)))
+        s.write("base_s42.log", log(block("Mo Mod", scored=9, persona="1.00", buy=9, hold=91.0),
+                                    block("Ann Aggr", scored=100)))
+        rows, notes = s.load()
+        text = A.report(rows, notes)
+        self.assertIn("persona scored", text)
+        self.assertIn("17% (17/100)", text)               # mw / moderate
+        self.assertIn("LOW PERSONA COVERAGE", text)
+        self.assertIn("mw / moderate: 17 of 100", text)
+        self.assertIn("base / moderate: 9 of 100", text)
+        self.assertNotIn("mw / aggressive", text)         # 100% covered, not called out
+        self.assertIn("[persona scored: mw 17% (17/100), base 9% (9/100)]", text)
+
+    def test_coverage_pools_scored_and_decisions_across_agents_and_seeds(self):
+        s = self.s
+        s.write("mw_s42.log", log(block("Mo Mod", scored=20), block("Cara Cons", scored=100)))
+        s.write("mw_s43.log", log(block("Mo Mod", scored=0, persona="N/A", drift=0)))
+        rows, _ = s.load()
+        sbm = A.seed_bucket_metrics(rows)
+        self.assertEqual(A.persona_coverage(sbm, "mw", "moderate", [42, 43]), (20, 200))
+        self.assertEqual(A.persona_coverage(sbm, "mw", "conservative", [42, 43]), (100, 100))
+
     def test_csv_has_one_row_per_arm_seed_agent(self):
         s = self.s
         s.write("mw_s42.log", log(block("Ann Aggr"), block("Cara Cons")))

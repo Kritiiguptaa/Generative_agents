@@ -178,6 +178,8 @@ def seed_bucket_metrics(rows):
             persona=statistics.mean([r["persona"] for r in rs if r.get("persona") is not None] or [float("nan")])
             if any(r.get("persona") is not None for r in rs) else None,
             drift_per100=_rate(sum(r.get("drift", 0) for r in rs), dec),
+            scored=sum(r.get("scored", 0) for r in rs),
+            decisions=dec,
             pnl_pct=statistics.mean(100.0 * r["pnl"] / r["start"] for r in rs if r.get("start")) if any(r.get("start") for r in rs) else None,
         )
     return res
@@ -192,6 +194,27 @@ def _fmt(m, sd, n, digits=1):
     if m is None:
         return "   n/a"
     return f"{m:.{digits}f}±{sd:.{digits}f} (n={n})" if n > 1 else f"{m:.{digits}f} (n=1)"
+
+
+# Persona coverage: the share of decisions the persona score actually covers. A
+# moderate agent has no language check, and a HOLD that names no off-profile
+# thing carries no evidence, so a moderate agent that mostly holds can have a
+# persona average built on a handful of buys (in the first nine-agent runs:
+# Alex 0 of 100, Tomas 1 of 100, Sara 17 of 100). An average like that reads as
+# 1.00 and means "no evidence". Coverage is printed beside every persona
+# number, and anything under this share is called out.
+LOW_PERSONA_COVERAGE = 50.0
+
+
+def persona_coverage(sbm, arm, bucket, seeds):
+    """-> (scored, decisions) pooled over the given seeds, for one arm and bucket."""
+    s = sum(sbm[(arm, bucket, sd)]["scored"] for sd in seeds if (arm, bucket, sd) in sbm)
+    d = sum(sbm[(arm, bucket, sd)]["decisions"] for sd in seeds if (arm, bucket, sd) in sbm)
+    return s, d
+
+
+def _cov_text(scored, decisions):
+    return "n/a" if not decisions else f"{100.0 * scored / decisions:.0f}% ({scored}/{decisions})"
 
 
 def report(rows, notes):
@@ -209,10 +232,12 @@ def report(rows, notes):
         return "\n".join(out)
 
     sbm = seed_bucket_metrics(rows)
+    low_cov = []
     out.append("\n## Per arm and bucket (mean ± sd ACROSS SEEDS of the per-seed bucket value)")
     for arm in arms:
         out.append(f"\n{arm}")
-        out.append("  " + f"{'bucket':<13}" + "".join(f"{lab:<24}" for _, lab in METRICS))
+        out.append("  " + f"{'bucket':<13}" + "".join(f"{lab:<24}" for _, lab in METRICS)
+                   + "persona scored")
         for b in BUCKETS + ("unknown",):
             seeds_b = sorted(s for (a, bb, s) in sbm if a == arm and bb == b)
             if not seeds_b:
@@ -221,7 +246,19 @@ def report(rows, notes):
             for key, _ in METRICS:
                 m, sd, n = mean_sd([sbm[(arm, b, s)][key] for s in seeds_b])
                 cells.append(_fmt(m, sd, n, 2 if key == "persona" else 1))
+            sc, dc = persona_coverage(sbm, arm, b, seeds_b)
+            cells.append(_cov_text(sc, dc))
+            if dc and 100.0 * sc / dc < LOW_PERSONA_COVERAGE:
+                low_cov.append((arm, b, sc, dc))
             out.append("  " + f"{b:<13}" + "".join(f"{c:<24}" for c in cells))
+
+    if low_cov:
+        out.append("\nLOW PERSONA COVERAGE (persona score covers under "
+                   f"{LOW_PERSONA_COVERAGE:.0f}% of decisions):")
+        for arm, b, sc, dc in low_cov:
+            out.append(f"  {arm} / {b}: {sc} of {dc} decisions scored. The persona average there "
+                       "rests on those decisions only (mostly buys); a 1.00 is absence of "
+                       "evidence, not consistency.")
 
     if "mw" in arms and "base" in arms:
         out.append("\n## Paired: middleware minus baseline, per seed (negative = middleware lower)")
@@ -242,12 +279,16 @@ def report(rows, notes):
                     out.append(f"  {lab:<22} n/a")
                     continue
                 lower = sum(d < 0 for d in diffs)
-                out.append(f"  {lab:<22} per seed: "
-                           + " ".join(f"{d:+.2f}" for d in diffs)
-                           + f"   mean {statistics.mean(diffs):+.2f}   lower in {lower}/{len(diffs)} seeds")
+                line = (f"  {lab:<22} per seed: "
+                        + " ".join(f"{d:+.2f}" for d in diffs)
+                        + f"   mean {statistics.mean(diffs):+.2f}   lower in {lower}/{len(diffs)} seeds")
+                if key in ("persona", "drift_per100"):
+                    line += (f"   [persona scored: mw {_cov_text(*persona_coverage(sbm, 'mw', b, common))}"
+                             f", base {_cov_text(*persona_coverage(sbm, 'base', b, common))}]")
+                out.append(line)
 
     out.append("\n## Per agent (mean over seeds)")
-    out.append(f"  {'arm':<8}{'agent':<18}{'bucket':<14}{'hold %':>8}{'persona':>9}{'drift ev':>10}{'buys':>7}{'seeds':>7}")
+    out.append(f"  {'arm':<8}{'agent':<18}{'bucket':<14}{'hold %':>8}{'persona':>9}{'scored':>9}{'drift ev':>10}{'buys':>7}{'seeds':>7}")
     key = lambda r: (r["arm"], BUCKETS.index(r["bucket"]) if r["bucket"] in BUCKETS else 9, r["agent"])
     done = set()
     for r in sorted(rows, key=key):
@@ -258,8 +299,11 @@ def report(rows, notes):
         rs = [x for x in rows if (x["arm"], x["agent"]) == k]
         hold = statistics.mean(x["hold_pct"] for x in rs if "hold_pct" in x)
         per = [x["persona"] for x in rs if x.get("persona") is not None]
+        sc = sum(x.get("scored", 0) for x in rs)
+        dc = sum(x.get("decisions", 0) for x in rs)
+        cov = f"{100.0 * sc / dc:.0f}%" if dc else "n/a"
         out.append(f"  {r['arm']:<8}{r['agent']:<18}{r['bucket']:<14}{hold:>8.1f}"
-                   f"{(statistics.mean(per) if per else float('nan')):>9.2f}"
+                   f"{(statistics.mean(per) if per else float('nan')):>9.2f}{cov:>9}"
                    f"{statistics.mean(x.get('drift', 0) for x in rs):>10.1f}"
                    f"{statistics.mean(x.get('buy', 0) for x in rs):>7.1f}{len(rs):>7}")
 
