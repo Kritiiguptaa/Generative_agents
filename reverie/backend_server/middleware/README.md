@@ -115,7 +115,10 @@ of them: the removed checks were measuring the wrong thing.
 **What is in place.** `analyze_sweep.py` prints the share of decisions the
 persona score covers next to every persona average, per arm and bucket and per
 agent, and calls out any bucket under 50%. Persona scores are therefore never
-read without their coverage. Until the check below exists, report persona
+read without their coverage. `analyze_sweep.py --rescore` recomputes the persona
+numbers from each sim's `trading_log.json` with the current scorer, so a scorer
+change can be applied to a finished sweep without rerunning it (keep the sim
+folders under `storage/`). Until the check below exists, report persona
 consistency for moderate agents as "buys only, n = X" and do not interpret it.
 
 **The best fix: score a HOLD against the persona's own rules.** Every persona
